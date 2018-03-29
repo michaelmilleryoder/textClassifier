@@ -12,7 +12,12 @@ import os
 import pdb
 
 os.environ['KERAS_BACKEND']='theano'
-os.environ['CUDA_VISIBLE_DEVICES']='2'
+os.environ['CUDA_VISIBLE_DEVICES']='1'
+os.environ['THEANO_FLAGS'] = 'device=cuda'
+#os.environ['THEANO_FLAGS'] = 'device=gpu'
+os.environ['THEANO_FLAGS'] = 'floatX=float32'
+os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
 
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.preprocessing.sequence import pad_sequences
@@ -76,8 +81,7 @@ class DataHandler():
         all_posts = [p for posts in posts_by_blog for p in posts]
 
         # Tokenize text posts
-        tokenizer = Tokenizer(num_words=self.max_num_words,
-                                filters='!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n“”')
+        tokenizer = Tokenizer(num_words=self.max_num_words,   filters='!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n“”')
         tokenizer.fit_on_texts(all_posts)
         self.word_index = tokenizer.word_index
         self.vocab = list(self.word_index.keys())[:self.max_num_words]
@@ -96,8 +100,8 @@ class DataHandler():
 
         # Prepare description categories (labels)
         cats = self.descs.columns.tolist()[-8:]
-        labels = list(zip(*[self.descs[cat] for cat in cats]))
-        labels = to_categorical(np.array(labels, dtype=int))
+        labels = np.array(list(zip(*[self.descs[cat] for cat in cats])))
+        #labels = to_categorical(np.array(labels, dtype=int))
 
         # Shuffle, split into train/dev/test
         test_size = int(self.test_dev_split * len(data))
@@ -114,29 +118,31 @@ class DataHandler():
     
         # Number of samples
         print()
-        print(f"# training instances: {len(X_train)}")
-        print(f"# dev instances: {len(X_dev)}")
-        print(f"# test instances: {len(X_test)}")
+        print("# training instances: {}".format(len(X_train)))
+        print("# dev instances: {}".format(len(X_dev)))
+        print("# test instances: {}".format(len(X_test)))
         print()
 
         # Shapes of tensors
-        print(f"Shape of training feature tensor: {X_train.shape}")
-        print(f"Shape of training labels tensor: {y_train.shape}")
+        print("Shape of training feature tensor: {}".format(X_train.shape))
+        print("Shape of training labels tensor: {}".format(y_train.shape))
         print()
 
 
 class AttLayer(Layer):
     def __init__(self, **kwargs):
         self.init = initializers.get('normal')
-        #self.input_spec = [InputSpec(ndim=3)]
+        self.input_spec = [InputSpec(ndim=3)]
         super(AttLayer, self).__init__(**kwargs)
 
     def build(self, input_shape):
         assert len(input_shape)==3
-        #self.W = self.init((input_shape[-1],1))
-        self.W = self.init((input_shape[-1],))
-        #self.input_spec = [InputSpec(shape=input_shape)]
-        self.trainable_weights = [self.W]
+        #self.W = self.init((input_shape[-1],))
+        #self.trainable_weights = [self.W]
+        self.W = self.add_weight(name='kernel', 
+                                  shape=(input_shape[-1],),
+                                  initializer='normal',
+                                  trainable=True)
         super(AttLayer, self).build(input_shape)
 
     def call(self, x, mask=None):
@@ -151,6 +157,8 @@ class AttLayer(Layer):
     def get_output_shape_for(self, input_shape):
         return (input_shape[0], input_shape[-1])
 
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[-1])
 
 class HAN():
     """ Hierarchical Attention Network """
@@ -161,7 +169,7 @@ class HAN():
             'tumblr_halfday': '/usr0/home/mamille2/tumblr/data/recent100_100posts_embeds.npy'
             }
 
-    def _build_embedding_layer(self, vocab_size, embedding_dim, embeddings):
+    def _build_embedding_layer(self, vocab_size, embedding_dim,max_post_length, embeddings):
 
         # Load embeddings
         #print("Loading pretrained embedding weights...", end=' ')
@@ -171,30 +179,30 @@ class HAN():
                             vocab_size,
                             embedding_dim,
                             weights = [vocab_embed],
-                            trainable=False
+                            input_length = max_post_length,
+                            trainable=True
                         )
 
         return embedding_layer
 
     def build_model(self, vocab_size, embedding_dim, max_post_length, max_num_posts, embeddings='tumblr_halfday'):
         
-        embedding_layer = self._build_embedding_layer(vocab_size, embedding_dim, embeddings)
+        embedding_layer = self._build_embedding_layer(vocab_size, embedding_dim, max_post_length, embeddings)
 
-        sentence_input = Input(shape=(max_post_length,), dtype='int32')
-        embedded_sequences = embedding_layer(sentence_input)
+        post_input = Input(shape=(max_post_length,), dtype='int32')
+        embedded_sequences = embedding_layer(post_input)
         l_lstm = Bidirectional(GRU(100, return_sequences=True))(embedded_sequences)
         l_dense = TimeDistributed(Dense(200))(l_lstm)
         l_att = AttLayer()(l_dense)
-        sentEncoder = Model(sentence_input, l_att)
+        postEncoder = Model(post_input, l_att)
 
-        post_input = Input(shape=(max_num_posts,max_post_length), dtype='int32')
-        post_encoder = TimeDistributed(sentEncoder)(post_input)
-        pdb.set_trace()
-        l_lstm_sent = Bidirectional(GRU(100, return_sequences=True))(post_encoder)
-        l_dense_sent = TimeDistributed(Dense(200))(l_lstm_sent)
-        l_att_sent = AttLayer()(l_dense_sent)
-        preds = Dense(8, activation='sigmoid')(l_att_sent)
-        model = Model(post_input, preds)
+        blog_input = Input(shape=(max_num_posts,max_post_length), dtype='int32')
+        blog_encoder = TimeDistributed(postEncoder)(blog_input)
+        l_lstm_post = Bidirectional(GRU(100, return_sequences=True))(blog_encoder)
+        l_dense_post = TimeDistributed(Dense(200))(l_lstm_post)
+        l_att_post = AttLayer()(l_dense_post)
+        preds = Dense(8, activation='sigmoid')(l_att_post)
+        model = Model(blog_input, preds)
 
         model.compile(loss='binary_crossentropy',
                       optimizer='rmsprop',
@@ -204,6 +212,8 @@ class HAN():
 
 
 def main():
+
+    model_filepath = '/usr0/home/mamille2/tumblr/models/'
 
     # Load, preprocess data
     dh = DataHandler(max_num_words=100000)
@@ -222,24 +232,18 @@ def main():
     print('done.')
     sys.stdout.flush()
 
-    pdb.set_trace()
+    model.summary()
 
     # Train model
     print("Training model...", end=' ')
     sys.stdout.flush()
     model.fit(X_train, y_train, validation_data=(X_dev, y_dev),
-          nb_epoch=10, batch_size=16)
+          epochs=10, batch_size=16)
     print('done.')
     sys.stdout.flush()
 
+    # Save model
+    model.save(
+
 if __name__ == '__main__':
     main()
-
-
-
-#####################################################
-
-# building Hierachical Attention network
-
-
-print("model fitting - Hierachical attention network")
