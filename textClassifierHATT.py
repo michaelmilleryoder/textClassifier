@@ -10,6 +10,7 @@ import re
 import sys
 import os
 import pdb
+import datetime
 
 os.environ['KERAS_BACKEND']='theano'
 os.environ['CUDA_VISIBLE_DEVICES']='1'
@@ -32,12 +33,6 @@ from keras import initializers
 
 from sklearn.model_selection import train_test_split
 
-
-#MAX_SENT_LENGTH = 100
-#MAX_SENTS = 15
-#MAX_NB_WORDS = 20000
-#EMBEDDING_DIM = 300
-#VALIDATION_SPLIT = 0.2
 
 class DataHandler():
     """ For loading and preprocessing data """
@@ -211,9 +206,16 @@ class HAN():
         return model
 
 
+def save_model(model, dirpath):
+    outpath = os.path.join(dirpath, f"blog_predict_identity_cat_{datetime.datetime.now().strftime('%Y-%m-%DT%H-%M')}.h5")
+    print(f"Saving model to {outpath}...", end=' ')
+    model.save(outpath)
+    print('done.')
+
+
 def main():
 
-    model_filepath = '/usr0/home/mamille2/tumblr/models/'
+    model_dirpath = '/usr0/home/mamille2/tumblr/models/'
 
     # Load, preprocess data
     dh = DataHandler(max_num_words=100000)
@@ -243,7 +245,7 @@ def main():
     sys.stdout.flush()
 
     # Save model
-    model.save(
+    save_model(model, model_dirpath)
 
 if __name__ == '__main__':
     main()
