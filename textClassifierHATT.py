@@ -11,6 +11,9 @@ import sys
 import os
 import pdb
 import datetime
+import argparse
+import math
+import pickle
 
 os.environ['KERAS_BACKEND']='theano'
 os.environ['CUDA_VISIBLE_DEVICES']='1'
@@ -26,7 +29,7 @@ from keras.utils.np_utils import to_categorical
 from keras.layers import Embedding
 from keras.layers import Dense, Input, Flatten
 from keras.layers import Conv1D, MaxPooling1D, Embedding, Merge, Dropout, LSTM, GRU, Bidirectional, TimeDistributed
-from keras.models import Model
+from keras.models import Model, load_model
 from keras import backend as K
 from keras.engine.topology import Layer, InputSpec
 from keras import initializers
@@ -72,6 +75,10 @@ class DataHandler():
 
         # Get text posts
         posts_by_blog = [[p for p in self.posts[self.posts['tumblog_id']==tid]['body_str_no_titles'].tolist()] for tid in self.tids] # list of 100 posts/user
+        
+        # Save posts_by_blog
+        with open('/usr0/home/mamille2/posts_by_blog.pkl', 'wb') as f:
+            pickle.dump(posts_by_blog, f)
 
         all_posts = [p for posts in posts_by_blog for p in posts]
 
@@ -100,9 +107,14 @@ class DataHandler():
 
         # Shuffle, split into train/dev/test
         test_size = int(self.test_dev_split * len(data))
-        X_train, X_test, y_train, y_test = train_test_split(data, labels, test_size=test_size)
+        indices = np.arange(len(data))
+        X_train, X_test, y_train, y_test, inds_train, inds_test = train_test_split(data, labels, indices, test_size=test_size, random_state=0)
 
-        X_train, X_dev, y_train, y_dev = train_test_split(X_train, y_train, test_size=test_size)
+        X_train, X_dev, y_train, y_dev, inds_train, inds_dev = train_test_split(X_train, y_train, inds_train, test_size=test_size, random_state=0)
+
+        # Save dev indices
+        with open('/usr0/home/mamille2/dev_inds.pkl', 'wb') as f:
+            pickle.dump(inds_dev, f)
     
         print("done.")
         sys.stdout.flush()
@@ -203,17 +215,74 @@ class HAN():
                       optimizer='rmsprop',
                       metrics=['acc'])
 
-        return model
+        model.summary()
+        self.model = model
 
 
-def save_model(model, dirpath):
-    outpath = os.path.join(dirpath, f"blog_predict_identity_cat_{datetime.datetime.now().strftime('%Y-%m-%DT%H-%M')}.h5")
-    print(f"Saving model to {outpath}...", end=' ')
-    model.save(outpath)
-    print('done.')
+    def train_model(self, X_train, y_train, X_dev, y_dev, epochs=10, batch_size=16):
+        self.model.fit(X_train, y_train, validation_data=(X_dev, y_dev),
+              epochs=epochs, batch_size=batch_size)
+
+
+    def load_model(self, model_name, dirpath):
+
+        #if model_name == "default":
+        #    # Load first model in dir
+        #    model_name = os.listdir(dirpath)[0]
+        
+        model_path = os.path.join(dirpath, f"blog_predict_identity_cat_{model_name}.h5")
+        self.model = load_model(model_path, custom_objects={'AttLayer': AttLayer})
+
+
+    def save_model(self, dirpath):
+        outpath = os.path.join(dirpath, f"blog_predict_identity_cat_{datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')}.h5")
+        print(f"Saving model to {outpath}...", end=' ')
+        self.model.save(outpath)
+        print('done.')
+
+    
+    def predict(self, X):
+        preds = self.model.predict(X)
+        return preds
+    
+
+    def get_attention_weights(self, X):
+        get_layer_output = K.function([self.model.layers[0].input, K.learning_phase()], [self.model.layers[3].output])
+        att_w = self.model.layers[4].get_weights()[0]
+
+        weight_list = []
+
+        batch_size = 16
+        start = 0
+        end = start + batch_size
+
+        for i in range(math.floor(len(X)/batch_size)):
+            batch = X[start:end]
+            out = get_layer_output([batch, 0])[0]
+            
+            # Maybe could just get output of attention layer
+            for j in range(batch_size):
+                eij = np.tanh(np.dot(out[j], att_w))
+                ai = np.exp(eij)
+                weights = ai/np.sum(ai)
+                weight_list.append(weights)
+
+            start = end
+            end = start + batch_size
+
+        # Save attention weights
+        with open('/usr0/home/mamille2/tumblr_attn_test.pkl', 'wb') as f:
+            pickle.dump(weight_list, f)
+        pdb.set_trace()
+
+        return weight_list
 
 
 def main():
+
+    parser = argparse.ArgumentParser(description="Train and run hierarchical attention network")
+    parser.add_argument('--load-model', nargs='?', dest='model_name')
+    args = parser.parse_args()
 
     model_dirpath = '/usr0/home/mamille2/tumblr/models/'
 
@@ -226,26 +295,45 @@ def main():
 
     dh.print_info(X_train, X_dev, X_test, y_train, y_dev, y_test)
 
-    # Build model
-    print("Building model...", end=' ')
-    sys.stdout.flush()
     han = HAN()
-    model = han.build_model(dh.max_num_words, dh.embedding_dim, dh.max_post_length, dh.max_num_posts)
-    print('done.')
-    sys.stdout.flush()
+    han.load_model(args.model_name, model_dirpath)
 
-    model.summary()
+    if args.model_name:
+        
+        # Load model
+        print("Loading model...", end=' ')
+        sys.stdout.flush()
+        han.load_model(args.model_name, model_dirpath)
+        print("done.")
+        sys.stdout.flush()
 
-    # Train model
-    print("Training model...", end=' ')
-    sys.stdout.flush()
-    model.fit(X_train, y_train, validation_data=(X_dev, y_dev),
-          epochs=10, batch_size=16)
-    print('done.')
-    sys.stdout.flush()
+        # Get, save attention weights
+        print("Getting attention weights...", end=" ")
+        sys.stdout.flush()
+        attn_weights = han.get_attention_weights(X_dev)
+        
 
-    # Save model
-    save_model(model, model_dirpath)
+        print('done.')
+        sys.stdout.flush()
+
+    else:
+
+        # Build model
+        print("Building model...", end=' ')
+        sys.stdout.flush()
+        han.build_model(dh.max_num_words, dh.embedding_dim, dh.max_post_length, dh.max_num_posts)
+        print('done.')
+        sys.stdout.flush()
+
+        # Train model
+        print("Training model...", end=' ')
+        sys.stdout.flush()
+        han.train_model(X_train, y_train, X_dev, y_dev)
+        print('done.')
+        sys.stdout.flush()
+
+        # Save model
+        han.save_model(model_dirpath)
 
 if __name__ == '__main__':
     main()
