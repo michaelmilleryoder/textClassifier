@@ -388,9 +388,11 @@ class HAN():
                 * cats: list of names of categories, in the order of labeled instances in y
         """
         preds = self.predict(X)
+        preds[preds>=0.5] = True
+        preds[preds<0.5] = False
+
         assert y.shape[1] == len(cats)
         scores = {}
-        pdb.set_trace()
 
         # Per-category scores
         scores['category'] = self._category_scores(preds, y, cats)
