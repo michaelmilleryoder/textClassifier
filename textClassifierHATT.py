@@ -44,7 +44,8 @@ from sklearn.metrics import cohen_kappa_score, precision_score, recall_score, f1
 
 
 class DataHandler():
-    """ For loading and preprocessing data """
+    """ For loading and preprocessing data.
+        Might be good to be able to serialize (at least essentials). """
 
     def __init__(self, data_dirpath,
                 max_num_posts=100, 
@@ -63,7 +64,7 @@ class DataHandler():
         self.tids = None
         self.cats = None
         self.name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
-        self.data_dirpath = # where will save processed data
+        self.data_dirpath = data_dirpath # where will save processed data
 
     def load_data(self, descs_filepath, posts_filepath):
 
@@ -87,8 +88,8 @@ class DataHandler():
         posts_by_blog = [[p for p in self.posts[self.posts['tumblog_id']==tid]['body_str_no_titles'].tolist()] for tid in self.tids] # list of 100 posts/user
         
         # Save posts_by_blog
-        with open('/usr0/home/mamille2/posts_by_blog.pkl', 'wb') as f:
-            pickle.dump(posts_by_blog, f)
+        #with open('/usr0/home/mamille2/posts_by_blog.pkl', 'wb') as f:
+        #    pickle.dump(posts_by_blog, f)
 
         all_posts = [p for posts in posts_by_blog for p in posts]
 
@@ -132,10 +133,15 @@ class DataHandler():
             np.savez_compressed(vectorized_datapath, 
                     X_train=X_train,
                     X_dev=X_dev,
+                    X_test=X_test,
                     y_train=y_train,
                     y_dev=y_dev,
+                    y_test=y_test,
                     inds_train=inds_train,
-                    inds_dev=inds_dev)
+                    inds_dev=inds_dev,
+                    inds_test=inds_test,
+                    cats=self.cats
+                    )
     
         print("done.")
         sys.stdout.flush()
@@ -146,10 +152,11 @@ class DataHandler():
         return X_train, X_dev, X_test, y_train, y_dev, y_test
 
 
-    def load_processed_data(self, datapath):
+    def load_processed_data(self, dataname):
+        datapath = os.path.join(self.data_dirpath, f"{dataname}_preprocessed_data.npz")
         loaded = np.load(datapath)
-        X_train, X_dev, X_test, y_train, y_dev, y_test = \
-            loaded['X_train'], loaded['X_dev'], loaded['X_test'], loaded['y_train'], loaded['y_dev'], loaded['y_train']
+        X_train, X_dev, X_test, y_train, y_dev, y_test, self.cats = \
+            loaded['X_train'], loaded['X_dev'], loaded['X_test'], loaded['y_train'], loaded['y_dev'], loaded['y_train'], loaded['cats']
 
         return X_train, X_dev, X_test, y_train, y_dev, y_test
 
@@ -203,11 +210,14 @@ class AttLayer(Layer):
 class HAN():
     """ Hierarchical Attention Network """
 
-    def __init__(self):
+    def __init__(self, base_dirpath):
         self.model = None
         self.model_name = None
+        self.base_dirpath = base_dirpath
+        self.model_dirpath = os.path.join(base_dirpath, 'models')
+        self.output_dirpath = os.path.join(base_dirpath, 'output')
         self.embeddings_paths = {
-            'tumblr_halfday': '/usr0/home/mamille2/tumblr/data/recent100_100posts_embeds.npy'
+            'tumblr_halfday': os.path.join(base_dirpath, 'data/recent100_100posts_embeds.npy')
             }
 
     def _build_embedding_layer(self, vocab_size, embedding_dim,max_post_length, embeddings):
@@ -259,19 +269,19 @@ class HAN():
               epochs=epochs, batch_size=batch_size)
 
 
-    def load_model(self, model_name, dirpath):
+    def load_model(self, model_name):
 
         #if model_name == "default":
         #    # Load first model in dir
         #    model_name = os.listdir(dirpath)[0]
         
-        model_path = os.path.join(dirpath, f"blog_predict_identity_cat_{model_name}.h5")
+        model_path = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{model_name}.h5")
         self.model = load_model(model_path, custom_objects={'AttLayer': AttLayer})
 
 
-    def save_model(self, dirpath):
+    def save_model(self):
         self.model_name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
-        outpath = os.path.join(dirpath, f"blog_predict_identity_cat_{self.model_name}.h5")
+        outpath = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{self.model_name}.h5")
         print(f"Saving model to {outpath}...", end=' ')
         self.model.save(outpath)
         print('done.')
@@ -371,7 +381,7 @@ class HAN():
         return scores
 
 
-    def evaluate(self, X, y, cats, output_dirpath):
+    def evaluate(self, X, y, cats):
         """ 
             Returns prec, recall, f1 and kappa for each category and overall.
             Args:
@@ -393,7 +403,7 @@ class HAN():
         outlines = [['all'] + [scores['set'][m] for m in metrics[:-1]], \
                     *[[c] + scores['category'][c][m] for m in metrics]]
         outlines = pd.DataFrame(outlines, names=['category'] + metrics)
-        outpath = os.path.join(output_dirpath, f"model_{self.model_name}_scores.csv")
+        outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_scores.csv")
         outlines.to_csv(outpath, index=False)
 
         return scores
@@ -402,22 +412,21 @@ class HAN():
 def main():
 
     parser = argparse.ArgumentParser(description="Train and run hierarchical attention network")
+    parser.add_argument('base_dirpath', nargs='?', help="Path to directory with data, where should save models and output")
     parser.add_argument('--load-model', nargs='?', dest='model_name')
-    parser.add_argument('--load-data', nargs='?', dest='datapath')
+    parser.add_argument('--load-data', nargs='?', dest='dataname', help="Timestamp name of preprocessed data")
     args = parser.parse_args()
 
-    base_dirpath = '/usr0/home/mamille2/tumblr'
+    base_dirpath = args.base_dirpath
     descs_path = os.path.join(base_dirpath, 'data/list_descriptions_100posts.pkl')
     posts_path = os.path.join(base_dirpath, 'data/textposts_recent100_100posts.pkl')
-    model_dirpath = os.path.join(base_dirpath, 'models')
-    output_dirpath = os.path.join(base_dirpath, 'output')
 
     # Load, preprocess data
     dh = DataHandler(os.path.join(base_dirpath, 'data'), max_num_words=100000)
 
-    if datapath:
+    if args.dataname:
         # Load preprocessed, vectorized data
-        X_train, X_dev, X_test, y_train, y_dev, y_test = dh.load_processed_data(datapath)
+        X_train, X_dev, X_test, y_train, y_dev, y_test = dh.load_processed_data(args.dataname)
     
     else:
         dh.load_data(descs_path, posts_path)
@@ -425,28 +434,28 @@ def main():
 
     dh.print_info(X_train, X_dev, X_test, y_train, y_dev, y_test)
 
-    han = HAN()
+    han = HAN(base_dirpath)
 
     if args.model_name:
         
         # Load model
         print("Loading model...", end=' ')
         sys.stdout.flush()
-        han.load_model(args.model_name, model_dirpath)
+        han.load_model(args.model_name)
         print("done.")
         sys.stdout.flush()
 
         # Get, save attention weights
-        print("Getting attention weights...", end=" ")
-        sys.stdout.flush()
-        attn_weights = han.get_attention_weights(X_dev)
-        print('done.')
-        sys.stdout.flush()
+        #print("Getting attention weights...", end=" ")
+        #sys.stdout.flush()
+        #attn_weights = han.get_attention_weights(X_dev)
+        #print('done.')
+        #sys.stdout.flush()
 
         # Evaluate
         print("Evaluating model...", end=" ")
         sys.stdout.flush()
-        scores = han.evaluate(X_dev, y_dev, dh.cats, output_dirpath)
+        scores = han.evaluate(X_dev, y_dev, dh.cats)
         print("done.")
         sys.stdout.flush()
 
