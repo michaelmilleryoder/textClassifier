@@ -14,14 +14,19 @@ import datetime
 import argparse
 import math
 import pickle
+from pprint import pprint
 
 os.environ['KERAS_BACKEND']='theano'
-os.environ['CUDA_VISIBLE_DEVICES']='1'
-os.environ['THEANO_FLAGS'] = 'device=cuda'
-#os.environ['THEANO_FLAGS'] = 'device=gpu'
-os.environ['THEANO_FLAGS'] = 'floatX=float32'
-os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
-os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+
+# Use CPU
+os.environ['THEANO_FLAGS'] = 'device=cpu'
+
+# Use GPU
+#os.environ['CUDA_VISIBLE_DEVICES']='1'
+#os.environ['THEANO_FLAGS'] = 'device=cuda'
+#os.environ['THEANO_FLAGS'] = 'floatX=float32'
+#os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+#os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
 
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.preprocessing.sequence import pad_sequences
@@ -35,12 +40,14 @@ from keras.engine.topology import Layer, InputSpec
 from keras import initializers
 
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import cohen_kappa_score, precision_score, recall_score, f1_score
 
 
 class DataHandler():
     """ For loading and preprocessing data """
 
-    def __init__(self, max_num_posts=100, 
+    def __init__(self, data_dirpath,
+                max_num_posts=100, 
                 max_post_length=200, 
                 max_num_words = 50000,
                 embedding_dim = 300,
@@ -54,6 +61,9 @@ class DataHandler():
         self.descs = None
         self.posts = None
         self.tids = None
+        self.cats = None
+        self.name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
+        self.data_dirpath = # where will save processed data
 
     def load_data(self, descs_filepath, posts_filepath):
 
@@ -68,8 +78,8 @@ class DataHandler():
         print('done.')
         sys.stdout.flush()
 
-    def process_data(self, vectorize=True):
-        """ Preprocesses data and returns vectorized form if set """
+    def process_data(self, save=True):
+        """ Preprocesses data and returns vectorized form """
         print("Preprocessing data...", end=" ")
         sys.stdout.flush()
 
@@ -101,8 +111,8 @@ class DataHandler():
                             k=k+1                    
 
         # Prepare description categories (labels)
-        cats = self.descs.columns.tolist()[-8:]
-        labels = np.array(list(zip(*[self.descs[cat] for cat in cats])))
+        self.cats = self.descs.columns.tolist()[-8:]
+        labels = np.array(list(zip(*[self.descs[cat] for cat in self.cats])))
         #labels = to_categorical(np.array(labels, dtype=int))
 
         # Shuffle, split into train/dev/test
@@ -113,13 +123,36 @@ class DataHandler():
         X_train, X_dev, y_train, y_dev, inds_train, inds_dev = train_test_split(X_train, y_train, inds_train, test_size=test_size, random_state=0)
 
         # Save dev indices
-        with open('/usr0/home/mamille2/dev_inds.pkl', 'wb') as f:
-            pickle.dump(inds_dev, f)
+        #with open('/usr0/home/mamille2/dev_inds.pkl', 'wb') as f:
+        #    pickle.dump(inds_dev, f)
+
+        # Save vectorized data
+        vectorized_datapath = os.path.join(self.data_dirpath, f"{self.name}_preprocessed_data")
+        if save:
+            np.savez_compressed(vectorized_datapath, 
+                    X_train=X_train,
+                    X_dev=X_dev,
+                    y_train=y_train,
+                    y_dev=y_dev,
+                    inds_train=inds_train,
+                    inds_dev=inds_dev)
     
         print("done.")
         sys.stdout.flush()
+
+        print(f"Saved preprocessed data to {vectorized_datapath}.npz")        
+        sys.stdout.flush()
         
         return X_train, X_dev, X_test, y_train, y_dev, y_test
+
+
+    def load_processed_data(self, datapath):
+        loaded = np.load(datapath)
+        X_train, X_dev, X_test, y_train, y_dev, y_test = \
+            loaded['X_train'], loaded['X_dev'], loaded['X_test'], loaded['y_train'], loaded['y_dev'], loaded['y_train']
+
+        return X_train, X_dev, X_test, y_train, y_dev, y_test
+
 
     def print_info(self, X_train, X_dev, X_test, y_train, y_dev, y_test):
     
@@ -172,6 +205,7 @@ class HAN():
 
     def __init__(self):
         self.model = None
+        self.model_name = None
         self.embeddings_paths = {
             'tumblr_halfday': '/usr0/home/mamille2/tumblr/data/recent100_100posts_embeds.npy'
             }
@@ -191,6 +225,7 @@ class HAN():
                         )
 
         return embedding_layer
+
 
     def build_model(self, vocab_size, embedding_dim, max_post_length, max_num_posts, embeddings='tumblr_halfday'):
         
@@ -235,7 +270,8 @@ class HAN():
 
 
     def save_model(self, dirpath):
-        outpath = os.path.join(dirpath, f"blog_predict_identity_cat_{datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')}.h5")
+        self.model_name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
+        outpath = os.path.join(dirpath, f"blog_predict_identity_cat_{self.model_name}.h5")
         print(f"Saving model to {outpath}...", end=' ')
         self.model.save(outpath)
         print('done.')
@@ -271,32 +307,125 @@ class HAN():
             end = start + batch_size
 
         # Save attention weights
-        with open('/usr0/home/mamille2/tumblr_attn_test.pkl', 'wb') as f:
-            pickle.dump(weight_list, f)
-        pdb.set_trace()
+        #with open('/usr0/home/mamille2/tumblr_attn_test.pkl', 'wb') as f:
+        #    pickle.dump(weight_list, f)
 
         return weight_list
+
+
+    def _set_scores(self, preds, actual):
+        """ Returns set measures of precision, recall and f1 """
+        
+        precisions = []
+        recalls = []
+        
+        for pred, act in zip(preds, actual):
+            pred_labels = set(np.flatnonzero(pred)) # binary encoding to indices
+            actual_labels = set(np.flatnonzero(act))
+            correct = pred_labels.intersection(actual_labels)
+            
+            # precision
+            if len(pred_labels) == 0:
+                if len(actual_labels) == 0:
+                    prec = 1.0 # Case where no labels predicted and actually are no labels
+                else: 
+                    prec = 0.0
+            else:
+                prec = len(correct)/len(pred_labels)
+            precisions.append(prec)
+            
+            # recall
+            if len(actual_labels) == 0:
+                if len(pred_labels) == 0:
+                    rec = 1.0 # Case where no labels predicted and actually are no labels
+                else:
+                    rec = 0.0
+            else:
+                rec = len(correct)/len(actual_labels)
+            recalls.append(rec)
+            
+        total_prec = np.mean(precisions)
+        total_rec = np.mean(recalls)
+        total_f1 = 2 * total_prec * total_rec / (total_prec + total_rec)
+        
+        return {'precision': total_prec,
+                'recall': total_rec,
+                'f1': total_f1}
+
+
+    def _category_scores(self, preds, y, cats):
+        metrics = {'kappa': cohen_kappa_score,
+                    'precision': precision_score,
+                    'recall': recall_score,
+                    'f1': f1_score}
+        scores = {}
+
+        for cat, i in zip(cats, list(range(preds.shape[1]))):
+            pred_col = preds.T[i]
+            actual_col = y.T[i]
+            scores[cat] = {}
+            
+            for name, scorer in metrics.items():
+                scores[cat][name] = scorer(pred_col, actual_col)
+        
+        return scores
+
+
+    def evaluate(self, X, y, cats, output_dirpath):
+        """ 
+            Returns prec, recall, f1 and kappa for each category and overall.
+            Args:
+                * cats: list of names of categories, in the order of labeled instances in y
+        """
+        preds = self.predict(X)
+        assert y.shape[1] == len(cats)
+        scores = {}
+        pdb.set_trace()
+
+        # Per-category scores
+        scores['category'] = self._category_scores(preds, y, cats)
+
+        # Aggregate scores
+        scores['set'] = self._set_scores(preds, y)
+
+        # Save scores
+        metrics = ['precision', 'recall', 'f1', 'kappa']
+        outlines = [['all'] + [scores['set'][m] for m in metrics[:-1]], \
+                    *[[c] + scores['category'][c][m] for m in metrics]]
+        outlines = pd.DataFrame(outlines, names=['category'] + metrics)
+        outpath = os.path.join(output_dirpath, f"model_{self.model_name}_scores.csv")
+        outlines.to_csv(outpath, index=False)
+
+        return scores
 
 
 def main():
 
     parser = argparse.ArgumentParser(description="Train and run hierarchical attention network")
     parser.add_argument('--load-model', nargs='?', dest='model_name')
+    parser.add_argument('--load-data', nargs='?', dest='datapath')
     args = parser.parse_args()
 
-    model_dirpath = '/usr0/home/mamille2/tumblr/models/'
+    base_dirpath = '/usr0/home/mamille2/tumblr'
+    descs_path = os.path.join(base_dirpath, 'data/list_descriptions_100posts.pkl')
+    posts_path = os.path.join(base_dirpath, 'data/textposts_recent100_100posts.pkl')
+    model_dirpath = os.path.join(base_dirpath, 'models')
+    output_dirpath = os.path.join(base_dirpath, 'output')
 
     # Load, preprocess data
-    dh = DataHandler(max_num_words=100000)
-    dh.load_data(
-            '/usr0/home/mamille2/tumblr/data/list_descriptions_100posts.pkl', 
-            '/usr0/home/mamille2/tumblr/data/textposts_recent100_100posts.pkl')
-    X_train, X_dev, X_test, y_train, y_dev, y_test = dh.process_data()
+    dh = DataHandler(os.path.join(base_dirpath, 'data'), max_num_words=100000)
+
+    if datapath:
+        # Load preprocessed, vectorized data
+        X_train, X_dev, X_test, y_train, y_dev, y_test = dh.load_processed_data(datapath)
+    
+    else:
+        dh.load_data(descs_path, posts_path)
+        X_train, X_dev, X_test, y_train, y_dev, y_test = dh.process_data()
 
     dh.print_info(X_train, X_dev, X_test, y_train, y_dev, y_test)
 
     han = HAN()
-    han.load_model(args.model_name, model_dirpath)
 
     if args.model_name:
         
@@ -311,10 +440,17 @@ def main():
         print("Getting attention weights...", end=" ")
         sys.stdout.flush()
         attn_weights = han.get_attention_weights(X_dev)
-        
-
         print('done.')
         sys.stdout.flush()
+
+        # Evaluate
+        print("Evaluating model...", end=" ")
+        sys.stdout.flush()
+        scores = han.evaluate(X_dev, y_dev, dh.cats, output_dirpath)
+        print("done.")
+        sys.stdout.flush()
+
+        pprint(scores)
 
     else:
 
