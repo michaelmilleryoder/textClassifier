@@ -19,14 +19,14 @@ from pprint import pprint
 os.environ['KERAS_BACKEND']='theano'
 
 # Use CPU
-os.environ['THEANO_FLAGS'] = 'device=cpu'
+#os.environ['THEANO_FLAGS'] = 'device=cpu'
 
 # Use GPU
-#os.environ['CUDA_VISIBLE_DEVICES']='1'
-#os.environ['THEANO_FLAGS'] = 'device=cuda'
-#os.environ['THEANO_FLAGS'] = 'floatX=float32'
-#os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
-#os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+os.environ['CUDA_VISIBLE_DEVICES']='5'
+os.environ['THEANO_FLAGS'] = 'device=cuda'
+os.environ['THEANO_FLAGS'] = 'floatX=float32'
+os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
 
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.preprocessing.sequence import pad_sequences
@@ -271,12 +271,9 @@ class HAN():
 
     def load_model(self, model_name):
 
-        #if model_name == "default":
-        #    # Load first model in dir
-        #    model_name = os.listdir(dirpath)[0]
-        
         model_path = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{model_name}.h5")
-        self.model = load_model(model_path, custom_objects={'AttLayer': AttLayer})
+        self.model_name = model_name
+        self.model = load_model(model_path, custom_objects={'AttLayer': AttLayer}) # Keras function
 
 
     def save_model(self):
@@ -317,8 +314,9 @@ class HAN():
             end = start + batch_size
 
         # Save attention weights
-        #with open('/usr0/home/mamille2/tumblr_attn_test.pkl', 'wb') as f:
-        #    pickle.dump(weight_list, f)
+        outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_weights.pkl")
+        with open(outpath, 'wb') as f:
+            pickle.dump(weight_list, f)
 
         return weight_list
 
@@ -403,8 +401,8 @@ class HAN():
         # Save scores
         metrics = ['precision', 'recall', 'f1', 'kappa']
         outlines = [['all'] + [scores['set'][m] for m in metrics[:-1]], \
-                    *[[c] + scores['category'][c][m] for m in metrics]]
-        outlines = pd.DataFrame(outlines, names=['category'] + metrics)
+                    *[[c] + [scores['category'][c][m] for m in metrics] for c in cats]]
+        outlines = pd.DataFrame(outlines, columns=['category'] + metrics)
         outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_scores.csv")
         outlines.to_csv(outpath, index=False)
 
@@ -447,21 +445,26 @@ def main():
         print("done.")
         sys.stdout.flush()
 
-        # Get, save attention weights
-        #print("Getting attention weights...", end=" ")
-        #sys.stdout.flush()
-        #attn_weights = han.get_attention_weights(X_dev)
-        #print('done.')
-        #sys.stdout.flush()
+        # Save attention weight visualization
+        print("Getting attention weights...", end=" ")
+        sys.stdout.flush()
+        han.get_attention_weights(X_dev)
+        print('done.')
+        sys.stdout.flush()
+
+        print("Making attention weight visualization...", end=" ")
+        sys.stdout.flush()
+        han.post_attention_visualization()
+        print('done.')
+        sys.stdout.flush()
 
         # Evaluate
-        print("Evaluating model...", end=" ")
-        sys.stdout.flush()
-        scores = han.evaluate(X_dev, y_dev, dh.cats)
-        print("done.")
-        sys.stdout.flush()
-
-        pprint(scores)
+        #print("Evaluating model...", end=" ")
+        #sys.stdout.flush()
+        #scores = han.evaluate(X_dev, y_dev, dh.cats)
+        #print("done.")
+        #sys.stdout.flush()
+        #pprint(scores)
 
     else:
 
