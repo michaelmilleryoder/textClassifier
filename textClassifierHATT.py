@@ -14,6 +14,7 @@ import datetime
 import argparse
 import math
 import pickle
+import html
 from pprint import pprint
 
 os.environ['KERAS_BACKEND']='theano'
@@ -86,11 +87,6 @@ class DataHandler():
 
         # Get text posts
         posts_by_blog = [[p for p in self.posts[self.posts['tumblog_id']==tid]['body_str_no_titles'].tolist()] for tid in self.tids] # list of 100 posts/user
-        
-        # Save posts_by_blog
-        #with open('/usr0/home/mamille2/posts_by_blog.pkl', 'wb') as f:
-        #    pickle.dump(posts_by_blog, f)
-
         all_posts = [p for posts in posts_by_blog for p in posts]
 
         # Tokenize text posts
@@ -118,14 +114,10 @@ class DataHandler():
 
         # Shuffle, split into train/dev/test
         test_size = int(self.test_dev_split * len(data))
-        indices = np.arange(len(data))
-        X_train, X_test, y_train, y_test, inds_train, inds_test = train_test_split(data, labels, indices, test_size=test_size, random_state=0)
+        #indices = np.arange(len(data))
+        X_train, X_test, y_train, y_test, tids_train, tids_test = train_test_split(data, labels, self.tids, test_size=test_size, random_state=0)
 
-        X_train, X_dev, y_train, y_dev, inds_train, inds_dev = train_test_split(X_train, y_train, inds_train, test_size=test_size, random_state=0)
-
-        # Save dev indices
-        #with open('/usr0/home/mamille2/dev_inds.pkl', 'wb') as f:
-        #    pickle.dump(inds_dev, f)
+        X_train, X_dev, y_train, y_dev, tids_train, tids_dev = train_test_split(X_train, y_train, tids_train, test_size=test_size, random_state=0)
 
         # Save vectorized data
         vectorized_datapath = os.path.join(self.data_dirpath, f"{self.name}_preprocessed_data")
@@ -137,9 +129,9 @@ class DataHandler():
                     y_train=y_train,
                     y_dev=y_dev,
                     y_test=y_test,
-                    inds_train=inds_train,
-                    inds_dev=inds_dev,
-                    inds_test=inds_test,
+                    tids_train=tids_train,
+                    tids_dev=tids_dev,
+                    tids_test=tids_test,
                     cats=self.cats
                     )
     
@@ -155,10 +147,10 @@ class DataHandler():
     def load_processed_data(self, dataname):
         datapath = os.path.join(self.data_dirpath, f"{dataname}_preprocessed_data.npz")
         loaded = np.load(datapath)
-        X_train, X_dev, X_test, y_train, y_dev, y_test, self.cats = \
-            loaded['X_train'], loaded['X_dev'], loaded['X_test'], loaded['y_train'], loaded['y_dev'], loaded['y_train'], loaded['cats']
+        X_train, X_dev, X_test, y_train, y_dev, y_test, tids_train, tids_dev, tids_test, self.cats = \
+            loaded['X_train'], loaded['X_dev'], loaded['X_test'], loaded['y_train'], loaded['y_dev'], loaded['y_train'], loaded['tids_train'], loaded['tids_dev'], loaded['tids_test'], loaded['cats']
 
-        return X_train, X_dev, X_test, y_train, y_dev, y_test
+        return X_train, X_dev, X_test, y_train, y_dev, y_test, tids_train, tids_dev, tids_test
 
 
     def print_info(self, X_train, X_dev, X_test, y_train, y_dev, y_test):
@@ -408,6 +400,39 @@ class HAN():
 
         return scores
 
+    
+    def post_attention_visualization(attention_weights, tids, dh, descs_path, posts_path):
+        
+        # Don't do this later when serialize dh object
+        dh.load_data(descs_path, posts_path)
+
+        # Select posts by blog
+        sel_posts = {}
+        sel_weighted_posts = {}
+        for tid in tids:
+            sel_posts[tid] = dh.posts[dh.posts['tumblog_id']==tid]['body_str_no_titles'].tolist()
+
+        # Assign weights to sentences
+        for i, tid in enumerate(tids):
+            wts = attention_weights[i]
+            sel_weighted_posts[tid] = [(wts[j], post) for j, poost in enumerate(sel_posts[tid])] # assuming posts are in order of weights (might want to save out order in DataHandler object)
+            sel_weighted_posts[tid] = sorted(sel_weighted_posts[tid], ascending=False)
+
+        # Format posts as HTML string
+        post_strings = []
+        for tid in tids:
+            post_str = '\n'.join([html.escape(post) for _,post in sel_weighted_posts[tid]])
+            post_strings.append(post_str)
+
+        post_str_df = pd.DataFrame(list(zip(tids, post_strings)), columns=['tumblog_id', 'ranked_post_str'])
+
+        # Get desciption, predicted and gold category labels
+        columns = ['tumblog_id', 'restr_segments_25', 'ranked_post_str']
+        merged = pd.merge([dh.descs, dh.posts, post_str], on='tumblog_id')[:, columns]
+
+        # Save table as HTML
+        merged.to_html(os.path.join(self.output_dir, "model_{self.model_name}_post_attn_viz.html"))
+
 
 def main():
 
@@ -426,7 +451,7 @@ def main():
 
     if args.dataname:
         # Load preprocessed, vectorized data
-        X_train, X_dev, X_test, y_train, y_dev, y_test = dh.load_processed_data(args.dataname)
+        X_train, X_dev, X_test, y_train, y_dev, y_test, tids_train, tids_dev, tids_test = dh.load_processed_data(args.dataname)
     
     else:
         dh.load_data(descs_path, posts_path)
@@ -448,13 +473,13 @@ def main():
         # Save attention weight visualization
         print("Getting attention weights...", end=" ")
         sys.stdout.flush()
-        han.get_attention_weights(X_dev)
+        attn_weights = han.get_attention_weights(X_dev)
         print('done.')
         sys.stdout.flush()
 
         print("Making attention weight visualization...", end=" ")
         sys.stdout.flush()
-        han.post_attention_visualization()
+        han.post_attention_visualization(attn_weights, tids_dev, dh, descs_path, posts_path)
         print('done.')
         sys.stdout.flush()
 
