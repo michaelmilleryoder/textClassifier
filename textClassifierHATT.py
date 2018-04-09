@@ -20,14 +20,14 @@ from pprint import pprint
 os.environ['KERAS_BACKEND']='theano'
 
 # Use CPU
-#os.environ['THEANO_FLAGS'] = 'device=cpu'
+os.environ['THEANO_FLAGS'] = 'device=cpu'
 
 # Use GPU
-os.environ['CUDA_VISIBLE_DEVICES']='5'
-os.environ['THEANO_FLAGS'] = 'device=cuda'
-os.environ['THEANO_FLAGS'] = 'floatX=float32'
-os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
-os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+#os.environ['CUDA_VISIBLE_DEVICES']='5'
+#os.environ['THEANO_FLAGS'] = 'device=cuda'
+#os.environ['THEANO_FLAGS'] = 'floatX=float32'
+#os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+#os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
 
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.preprocessing.sequence import pad_sequences
@@ -69,16 +69,10 @@ class DataHandler():
 
     def load_data(self, descs_filepath, posts_filepath):
 
-        print("Loading data...", end=' ')
-        sys.stdout.flush()
-
         # Load descriptions
         self.descs = pd.read_pickle(descs_filepath)
         self.posts = pd.read_pickle(posts_filepath)
         self.tids = sorted(self.descs['tumblog_id'].tolist())
-
-        print('done.')
-        sys.stdout.flush()
 
     def process_data(self, save=True):
         """ Preprocesses data and returns vectorized form """
@@ -401,7 +395,7 @@ class HAN():
         return scores
 
     
-    def post_attention_visualization(attention_weights, tids, dh, descs_path, posts_path):
+    def post_attention_visualization(self, attention_weights, tids, dh, descs_path, posts_path):
         
         # Don't do this later when serialize dh object
         dh.load_data(descs_path, posts_path)
@@ -413,25 +407,43 @@ class HAN():
             sel_posts[tid] = dh.posts[dh.posts['tumblog_id']==tid]['body_str_no_titles'].tolist()
 
         # Assign weights to sentences
-        for i, tid in enumerate(tids):
+        for i in range(len(attention_weights)):
+            tid = tids[i]
             wts = attention_weights[i]
-            sel_weighted_posts[tid] = [(wts[j], post) for j, poost in enumerate(sel_posts[tid])] # assuming posts are in order of weights (might want to save out order in DataHandler object)
-            sel_weighted_posts[tid] = sorted(sel_weighted_posts[tid], ascending=False)
+            sel_weighted_posts[tid] = [(wts[j], post) for j, post in enumerate(sel_posts[tid])] # assuming posts are in order of weights (might want to save out order in DataHandler object)
+            sel_weighted_posts[tid] = sorted(sel_weighted_posts[tid], reverse=True)
+            
+            # Take top 5 and bottom 5 posts
+            sel_weighted_posts[tid] = sel_weighted_posts[tid][:5] + [(0, '~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')] + sel_weighted_posts[tid][-5:]
 
         # Format posts as HTML string
         post_strings = []
-        for tid in tids:
-            post_str = '\n'.join([html.escape(post) for _,post in sel_weighted_posts[tid]])
+        for tid in sel_weighted_posts.keys():
+            post_str = '<br><br>'.join([html.escape(post) for _,post in sel_weighted_posts[tid]])
             post_strings.append(post_str)
 
         post_str_df = pd.DataFrame(list(zip(tids, post_strings)), columns=['tumblog_id', 'ranked_post_str'])
+        post_str_df = post_str_df.sample(50) # downsample
 
         # Get desciption, predicted and gold category labels
         columns = ['tumblog_id', 'restr_segments_25', 'ranked_post_str']
-        merged = pd.merge([dh.descs, dh.posts, post_str], on='tumblog_id')[:, columns]
+        merged = pd.merge(dh.descs, dh.posts, on='tumblog_id')
+        merged = pd.merge(merged, post_str_df, on='tumblog_id').loc[:, columns]
+
+        # Drop duplicates
+        merged.drop_duplicates(subset=['tumblog_id'], inplace=True)
 
         # Save table as HTML
-        merged.to_html(os.path.join(self.output_dir, "model_{self.model_name}_post_attn_viz.html"))
+        pd.set_option('display.max_colwidth', -1)
+        merged.to_html(os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_viz.html"), escape=False)
+
+        
+    def load_attention_weights(self):
+        path = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_weights.pkl")
+        with open(path, 'rb') as f:
+            weight_list = pickle.load(f)
+
+        return weight_list
 
 
 def main():
@@ -440,6 +452,7 @@ def main():
     parser.add_argument('base_dirpath', nargs='?', help="Path to directory with data, where should save models and output")
     parser.add_argument('--load-model', nargs='?', dest='model_name')
     parser.add_argument('--load-data', nargs='?', dest='dataname', help="Timestamp name of preprocessed data")
+    parser.add_argument('--load-attn', dest='load_attn', action='store_true')
     args = parser.parse_args()
 
     base_dirpath = args.base_dirpath
@@ -454,7 +467,11 @@ def main():
         X_train, X_dev, X_test, y_train, y_dev, y_test, tids_train, tids_dev, tids_test = dh.load_processed_data(args.dataname)
     
     else:
+        print("Loading data...", end=' ')
+        sys.stdout.flush()
         dh.load_data(descs_path, posts_path)
+        print("done.")
+        sys.stdout.flush()
         X_train, X_dev, X_test, y_train, y_dev, y_test = dh.process_data()
 
     dh.print_info(X_train, X_dev, X_test, y_train, y_dev, y_test)
@@ -470,12 +487,20 @@ def main():
         print("done.")
         sys.stdout.flush()
 
-        # Save attention weight visualization
-        print("Getting attention weights...", end=" ")
-        sys.stdout.flush()
-        attn_weights = han.get_attention_weights(X_dev)
-        print('done.')
-        sys.stdout.flush()
+        if args.load_attn:
+            print("Loading attention weights...", end=' ')
+            sys.stdout.flush()
+            attn_weights = han.load_attention_weights()
+            print("done.")
+            sys.stdout.flush()
+
+        else:
+            # Save attention weight visualization
+            print("Getting attention weights...", end=" ")
+            sys.stdout.flush()
+            attn_weights = han.get_attention_weights(X_dev)
+            print('done.')
+            sys.stdout.flush()
 
         print("Making attention weight visualization...", end=" ")
         sys.stdout.flush()
