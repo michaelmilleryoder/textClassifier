@@ -497,26 +497,26 @@ def main():
         print("done.")
         sys.stdout.flush()
 
-        if args.load_attn:
-            print("Loading attention weights...", end=' ')
-            sys.stdout.flush()
-            attn_weights = han.load_attention_weights()
-            print("done.")
-            sys.stdout.flush()
+        #if args.load_attn:
+        #    print("Loading attention weights...", end=' ')
+        #    sys.stdout.flush()
+        #    attn_weights = han.load_attention_weights()
+        #    print("done.")
+        #    sys.stdout.flush()
 
-        else:
-            # Save attention weight visualization
-            print("Getting attention weights...", end=" ")
-            sys.stdout.flush()
-            attn_weights = han.get_attention_weights(X_dev)
-            print('done.')
-            sys.stdout.flush()
+        #else:
+        #    # Save attention weight visualization
+        #    print("Getting attention weights...", end=" ")
+        #    sys.stdout.flush()
+        #    attn_weights = han.get_attention_weights(X_dev)
+        #    print('done.')
+        #    sys.stdout.flush()
 
-        print("Making attention weight visualization...", end=" ")
-        sys.stdout.flush()
-        han.post_attention_visualization(attn_weights, tids_dev, dh, descs_path, posts_path)
-        print('done.')
-        sys.stdout.flush()
+        #print("Making attention weight visualization...", end=" ")
+        #sys.stdout.flush()
+        #han.post_attention_visualization(attn_weights, tids_dev, dh, descs_path, posts_path)
+        #print('done.')
+        #sys.stdout.flush()
 
         #print("Making attention weight visualization...", end=" ")
         #sys.stdout.flush()
