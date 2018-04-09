@@ -365,7 +365,7 @@ class HAN():
         return scores
 
 
-    def evaluate(self, X, y, cats):
+    def evaluate(self, X, X_name, X_tids, y, cats):
         """ 
             Returns prec, recall, f1 and kappa for each category and overall.
             Args:
@@ -374,6 +374,16 @@ class HAN():
         preds = self.predict(X)
         preds[preds>=0.5] = True
         preds[preds<0.5] = False
+
+        # Save predictions
+        pred_path = os.path.join(self.output_dirpath, f"model_{self.model_name}_{X_name}_preds.pkl")
+        pred_df = pd.DataFrame()
+        pred_df['tumblog_id'] = X_tids
+        for cat, pred, actual in zip(cats, preds.T, y.T):
+            pred_df[f'pred_{cat}'] = pred
+            pred_df[f'actual_{cat}'] = actual
+
+        pred_df.to_pickle(pred_path)
 
         assert y.shape[1] == len(cats)
         scores = {}
@@ -508,13 +518,19 @@ def main():
         print('done.')
         sys.stdout.flush()
 
+        #print("Making attention weight visualization...", end=" ")
+        #sys.stdout.flush()
+        #han.post_attention_visualization(attn_weights, tids_dev, dh, descs_path, posts_path)
+        #print('done.')
+        #sys.stdout.flush()
+
         # Evaluate
-        #print("Evaluating model...", end=" ")
-        #sys.stdout.flush()
-        #scores = han.evaluate(X_dev, y_dev, dh.cats)
-        #print("done.")
-        #sys.stdout.flush()
-        #pprint(scores)
+        print("Evaluating model...", end=" ")
+        sys.stdout.flush()
+        scores = han.evaluate(X_dev, 'dev', tids_dev,  y_dev, dh.cats)
+        print("done.")
+        sys.stdout.flush()
+        pprint(scores)
 
     else:
 
