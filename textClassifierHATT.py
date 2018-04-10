@@ -20,14 +20,14 @@ from pprint import pprint
 os.environ['KERAS_BACKEND']='theano'
 
 # Use CPU
-os.environ['THEANO_FLAGS'] = 'device=cpu'
+#os.environ['THEANO_FLAGS'] = 'device=cpu'
 
 # Use GPU
-#os.environ['CUDA_VISIBLE_DEVICES']='5'
-#os.environ['THEANO_FLAGS'] = 'device=cuda'
-#os.environ['THEANO_FLAGS'] = 'floatX=float32'
-#os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
-#os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+os.environ['CUDA_VISIBLE_DEVICES']='5'
+os.environ['THEANO_FLAGS'] = 'device=cuda'
+os.environ['THEANO_FLAGS'] = 'floatX=float32'
+os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
 
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.preprocessing.sequence import pad_sequences
@@ -232,10 +232,10 @@ class HAN():
         l_lstm = Bidirectional(GRU(100, return_sequences=True))(embedded_sequences)
         l_dense = TimeDistributed(Dense(200))(l_lstm)
         l_att = AttLayer()(l_dense)
-        postEncoder = Model(post_input, l_att)
+        post_encoder = Model(post_input, l_att)
 
         blog_input = Input(shape=(max_num_posts,max_post_length), dtype='int32')
-        blog_encoder = TimeDistributed(postEncoder)(blog_input)
+        blog_encoder = TimeDistributed(post_encoder)(blog_input)
         l_lstm_post = Bidirectional(GRU(100, return_sequences=True))(blog_encoder)
         l_dense_post = TimeDistributed(Dense(200))(l_lstm_post)
         l_att_post = AttLayer()(l_dense_post)
@@ -247,6 +247,7 @@ class HAN():
                       metrics=['acc'])
 
         model.summary()
+        self.post_encoder = post_encoder
         self.model = model
 
 
@@ -257,17 +258,23 @@ class HAN():
 
     def load_model(self, model_name):
 
-        model_path = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{model_name}.h5")
+        main_model_path = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{model_name}.h5")
+        post_encoder_path = os.path.join(self.model_dirpath, f"post_encoder_{model_name}.h5")
         self.model_name = model_name
         self.model = load_model(model_path, custom_objects={'AttLayer': AttLayer}) # Keras function
+        self.post_encoder = load_model(post_encoder_path, custom_objects={'AttLayer': AttLayer})
 
 
     def save_model(self):
         self.model_name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
+
+        # Save main model
         outpath = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{self.model_name}.h5")
-        print(f"Saving model to {outpath}...", end=' ')
         self.model.save(outpath)
-        print('done.')
+
+        # Save post encoder
+        outpath = os.path.join(self.model_dirpath, f"post_encoder_{self.model_name}.h5")
+        self.post_encoder.save(outpath)
 
     
     def predict(self, X):
@@ -275,8 +282,9 @@ class HAN():
         return preds
     
 
-    def get_attention_weights(self, X):
+    def post_attention_weights(self, X):
         get_layer_output = K.function([self.model.layers[0].input, K.learning_phase()], [self.model.layers[3].output])
+        #get_layer_output = K.function([self.model.layers[0].input, K.learning_phase()], [self.model.layers[4].output])
         att_w = self.model.layers[4].get_weights()[0]
 
         weight_list = []
@@ -288,8 +296,8 @@ class HAN():
         for i in range(math.floor(len(X)/batch_size)):
             batch = X[start:end]
             out = get_layer_output([batch, 0])[0]
+            #weight_list.extend(out)
             
-            # Maybe could just get output of attention layer
             for j in range(batch_size):
                 eij = np.tanh(np.dot(out[j], att_w))
                 ai = np.exp(eij)
@@ -301,6 +309,39 @@ class HAN():
 
         # Save attention weights
         outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_weights.pkl")
+        #outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_weights_direct.pkl")
+        with open(outpath, 'wb') as f:
+            pickle.dump(weight_list, f)
+
+        return weight_list
+
+
+    def word_attention_weights(self, X):
+
+        get_layer_output = K.function([self.post_encoder.layers[0].input, K.learning_phase()], [self.post_encoder.layers[2].output])
+        att_w = self.post_encoder.layers[3].get_weights()[0]
+
+        weight_list = []
+
+        batch_size = 16
+        start = 0
+        end = start + batch_size
+
+        for i in range(math.floor(len(X)/batch_size)):
+            batch = X[start:end]
+            out = get_layer_output([batch, 0])[0]
+            
+            for j in range(batch_size):
+                eij = np.tanh(np.dot(out[j], att_w))
+                ai = np.exp(eij)
+                weights = ai/np.sum(ai)
+                weight_list.append(weights)
+
+            start = end
+            end = start + batch_size
+
+        # Save attention weights
+        outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_word_attn_weights.pkl")
         with open(outpath, 'wb') as f:
             pickle.dump(weight_list, f)
 
@@ -382,6 +423,7 @@ class HAN():
         for cat, pred, actual in zip(cats, preds.T, y.T):
             pred_df[f'pred_{cat}'] = pred
             pred_df[f'actual_{cat}'] = actual
+            pred_df[f'actual_{cat}'] = pred_df[f'actual_{cat}'].astype(float)
 
         pred_df.to_pickle(pred_path)
 
@@ -402,10 +444,10 @@ class HAN():
         outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_scores.csv")
         outlines.to_csv(outpath, index=False)
 
-        return scores
+        return pred_df, scores
 
     
-    def post_attention_visualization(self, attention_weights, tids, dh, descs_path, posts_path):
+    def post_attention_visualization(self, attention_weights, tids, dh, descs_path, posts_path, pred_df):
         
         # Don't do this later when serialize dh object
         dh.load_data(descs_path, posts_path)
@@ -440,12 +482,32 @@ class HAN():
         merged = pd.merge(dh.descs, dh.posts, on='tumblog_id')
         merged = pd.merge(merged, post_str_df, on='tumblog_id').loc[:, columns]
 
+        # Merge with preditions, actual category values
+        merged = pd.merge(merged, pred_df, on='tumblog_id')
+        slice_preds = merged.loc[:, [f'pred_{cat}' for cat in dh.cats]]
+        preds_true = slice_preds.apply(lambda x: x > 0)
+        merged['predicted_categories'] = preds_true.apply(lambda x: list(slice_preds.columns[x.values]), axis=1)
+
+        slice_act = merged.loc[:, [f'actual_{cat}' for cat in dh.cats]]
+        actual_true = slice_act.apply(lambda x: x > 0)
+        merged['actual_categories'] = actual_true.apply(lambda x: list(slice_act.columns[x.values]), axis=1)
+
         # Drop duplicates
         merged.drop_duplicates(subset=['tumblog_id'], inplace=True)
 
+        # Select columns
+        sel_cols = ['tumblog_id', 'restr_segments_25', 'ranked_post_str', 'predicted_categories', 'actual_categories']
+        merged = merged.loc[:, sel_cols]
+
         # Save table as HTML
         pd.set_option('display.max_colwidth', -1)
-        merged.to_html(os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_viz.html"), escape=False)
+        s = merged.style.set_properties(**{'vertical-align': 'top', 'border': '1px solid gray', 'border-collapse': 'collapse'})
+        html_tab = s.render()
+        outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_viz.html")
+        with open(outpath, 'w') as f:
+            f.write(html_tab)
+
+        #merged.to_html(outpath, escape=False)
 
         
     def load_attention_weights(self):
@@ -497,41 +559,6 @@ def main():
         print("done.")
         sys.stdout.flush()
 
-        #if args.load_attn:
-        #    print("Loading attention weights...", end=' ')
-        #    sys.stdout.flush()
-        #    attn_weights = han.load_attention_weights()
-        #    print("done.")
-        #    sys.stdout.flush()
-
-        #else:
-        #    # Save attention weight visualization
-        #    print("Getting attention weights...", end=" ")
-        #    sys.stdout.flush()
-        #    attn_weights = han.get_attention_weights(X_dev)
-        #    print('done.')
-        #    sys.stdout.flush()
-
-        #print("Making attention weight visualization...", end=" ")
-        #sys.stdout.flush()
-        #han.post_attention_visualization(attn_weights, tids_dev, dh, descs_path, posts_path)
-        #print('done.')
-        #sys.stdout.flush()
-
-        #print("Making attention weight visualization...", end=" ")
-        #sys.stdout.flush()
-        #han.post_attention_visualization(attn_weights, tids_dev, dh, descs_path, posts_path)
-        #print('done.')
-        #sys.stdout.flush()
-
-        # Evaluate
-        print("Evaluating model...", end=" ")
-        sys.stdout.flush()
-        scores = han.evaluate(X_dev, 'dev', tids_dev,  y_dev, dh.cats)
-        print("done.")
-        sys.stdout.flush()
-        pprint(scores)
-
     else:
 
         # Build model
@@ -542,7 +569,7 @@ def main():
         sys.stdout.flush()
 
         # Train model
-        print("Training model...", end=' ')
+        print("\nTraining model...", end=' ')
         sys.stdout.flush()
         han.train_model(X_train, y_train, X_dev, y_dev)
         print('done.')
@@ -550,6 +577,35 @@ def main():
 
         # Save model
         han.save_model(model_dirpath)
+
+    # Evaluate
+    print("Evaluating model...", end=" ")
+    sys.stdout.flush()
+    pred_df, scores = han.evaluate(X_dev, 'dev', tids_dev,  y_dev, dh.cats)
+    print("done.")
+    sys.stdout.flush()
+    pprint(scores)
+
+    if args.load_attn:
+        print("Loading attention weights...", end=' ')
+        sys.stdout.flush()
+        post_attn_weights = han.load_attention_weights()
+        print("done.")
+        sys.stdout.flush()
+
+    else:
+        # Save attention weight visualization
+        print("Getting attention weights...", end=" ")
+        sys.stdout.flush()
+        post_attn_weights = han.post_attention_weights(X_dev)
+        print('done.')
+        sys.stdout.flush()
+
+    print("Making attention weight visualization...", end=" ")
+    sys.stdout.flush()
+    han.post_attention_visualization(post_attn_weights, tids_dev, dh, descs_path, posts_path, pred_df)
+    print('done.')
+    sys.stdout.flush()
 
 if __name__ == '__main__':
     main()
