@@ -470,7 +470,9 @@ class HAN():
         return html_str
     
 
-    def attention_visualization(self, attention_weights, word_weights, tids, dh, descs_path, posts_path, pred_df):
+    def attention_visualization(self, post_weights, word_weights, tids, dh, descs_path, posts_path, pred_df,
+        multiply_weights=False):
+        """ Max word weights are set from max word weight per blog """
         
         # Don't do this later when serialize dh object
         dh.load_data(descs_path, posts_path)
@@ -484,24 +486,26 @@ class HAN():
             sel_posts[tid] = dh.posts[dh.posts['tumblog_id']==tid]['body_str_no_titles'].tolist()
 
         # Assign weights to sentences
-        for i in range(len(attention_weights)):
+        for i in range(len(post_weights)):
             tid = tids[i]
-            wts = attention_weights[i]
-            sel_weighted_posts[tid] = [(wts[j], post) for j, post in enumerate(sel_posts[tid])] # assuming posts are in order of weights (might want to save out order in DataHandler object)
+            sel_weighted_posts[tid] = [(post_weights[i][j], post) for j, post in enumerate(sel_posts[tid])] # assuming posts are in order of weights (might want to save out order in DataHandler object)
             
             # Word weights
-            post_wts = word_weights[i]
+            post_wd_wts = word_weights[i]
             posts = sel_posts[tid]
         
             sel_wd_weights[tid] = []
 
             for j in range(len(posts)):
                 wds = posts[j].split()
-                wts = post_wts[j][:len(wds)]
+                if multiply_weights:
+                    wts = post_weights[i][j] * post_wd_wts[j][:len(wds)]
+                else:
+                    wts = post_wd_wts[j][:len(wds)]
                 sel_wd_weights[tid].append(list(zip(wts, wds)))
 
-            post_wts, _ = list(zip(*sel_weighted_posts[tid]))
-            sel_post_wd_weights[tid] = list(zip(post_wts, sel_wd_weights[tid])) # tid: [(post_wt, [(wd_wt, wd), ...]), ...]
+            post_wd_wts, _ = list(zip(*sel_weighted_posts[tid]))
+            sel_post_wd_weights[tid] = list(zip(post_wd_wts, sel_wd_weights[tid])) # tid: [(post_wt, [(wd_wt, wd), ...]), ...]
 
             # Take top 5 and bottom 5 posts
             sel_post_wd_weights[tid] = sorted(sel_post_wd_weights[tid], reverse=True)
@@ -666,7 +670,7 @@ def main():
 
     print("Making attention weight visualization...", end=" ")
     sys.stdout.flush()
-    han.attention_visualization(post_attn_weights, word_attn_weights, tids_dev, dh, descs_path, posts_path, pred_df)
+    han.attention_visualization(post_attn_weights, word_attn_weights, tids_dev, dh, descs_path, posts_path, pred_df, multiply_weights=True)
     print('done.')
     sys.stdout.flush()
 
