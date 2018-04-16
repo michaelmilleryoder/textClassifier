@@ -23,7 +23,7 @@ os.environ['KERAS_BACKEND']='theano'
 #os.environ['THEANO_FLAGS'] = 'device=cpu'
 
 # Use GPU
-os.environ['CUDA_VISIBLE_DEVICES']='5'
+os.environ['CUDA_VISIBLE_DEVICES']='0'
 os.environ['THEANO_FLAGS'] = 'device=cuda'
 os.environ['THEANO_FLAGS'] = 'floatX=float32'
 os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
@@ -246,7 +246,6 @@ class HAN():
                       optimizer='rmsprop',
                       metrics=['acc'])
 
-        model.summary()
         self.post_encoder = post_encoder
         self.model = model
 
@@ -258,7 +257,7 @@ class HAN():
 
     def load_model(self, model_name):
 
-        main_model_path = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{model_name}.h5")
+        model_path = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{model_name}.h5")
         post_encoder_path = os.path.join(self.model_dirpath, f"post_encoder_{model_name}.h5")
         self.model_name = model_name
         self.model = load_model(model_path, custom_objects={'AttLayer': AttLayer}) # Keras function
@@ -317,9 +316,8 @@ class HAN():
 
 
     def word_attention_weights(self, X):
-
-        get_layer_output = K.function([self.post_encoder.layers[0].input, K.learning_phase()], [self.post_encoder.layers[2].output])
-        att_w = self.post_encoder.layers[3].get_weights()[0]
+        get_layer_output = K.function([self.post_encoder.layers[0].input, K.learning_phase()], [self.post_encoder.layers[3].output])
+        att_w = self.post_encoder.layers[4].get_weights()[0]
 
         weight_list = []
 
@@ -329,10 +327,10 @@ class HAN():
 
         for i in range(math.floor(len(X)/batch_size)):
             batch = X[start:end]
-            out = get_layer_output([batch, 0])[0]
             
             for j in range(batch_size):
-                eij = np.tanh(np.dot(out[j], att_w))
+                out = get_layer_output([batch[j], 0])[0]
+                eij = np.tanh(np.dot(out, att_w))
                 ai = np.exp(eij)
                 weights = ai/np.sum(ai)
                 weight_list.append(weights)
@@ -446,8 +444,33 @@ class HAN():
 
         return pred_df, scores
 
+    def _color_attention(self, wts, total_max, total_min):
+        """ Returns 0-1 for highlighting """
+        
+        scale = total_max-total_min
+        vals = [(wt-total_min)/scale for wt in wts]
+        return vals
+
     
-    def post_attention_visualization(self, attention_weights, tids, dh, descs_path, posts_path, pred_df):
+    def _color_post(self, wds, wts, total_max, total_min):
+        """ Returns html with colored background for word attention """
+    
+        vals = self._color_attention(wts, total_max, total_min)
+
+    
+        #return ''.join([f"<span style='background-color: rgba(255,0,0,{val})'>{html.escape(wd)}</span>&nbsp" for val, wd in zip(vals, wds)])
+
+        html_str = ""
+        for i, (val, wd) in enumerate(list(zip(vals, wds))):
+            wd_str = f"<span style='background-color: rgba(255,0,0,{val})'>{html.escape(wd)}</span>&nbsp"
+            if i % 15 == 0:
+                wd_str += '<br>'
+            html_str += wd_str
+
+        return html_str
+    
+
+    def attention_visualization(self, attention_weights, word_weights, tids, dh, descs_path, posts_path, pred_df):
         
         # Don't do this later when serialize dh object
         dh.load_data(descs_path, posts_path)
@@ -455,6 +478,8 @@ class HAN():
         # Select posts by blog
         sel_posts = {}
         sel_weighted_posts = {}
+        sel_wd_weights = {}
+        sel_post_wd_weights = {}
         for tid in tids:
             sel_posts[tid] = dh.posts[dh.posts['tumblog_id']==tid]['body_str_no_titles'].tolist()
 
@@ -463,19 +488,50 @@ class HAN():
             tid = tids[i]
             wts = attention_weights[i]
             sel_weighted_posts[tid] = [(wts[j], post) for j, post in enumerate(sel_posts[tid])] # assuming posts are in order of weights (might want to save out order in DataHandler object)
-            sel_weighted_posts[tid] = sorted(sel_weighted_posts[tid], reverse=True)
             
+            # Word weights
+            post_wts = word_weights[i]
+            posts = sel_posts[tid]
+        
+            sel_wd_weights[tid] = []
+
+            for j in range(len(posts)):
+                wds = posts[j].split()
+                wts = post_wts[j][:len(wds)]
+                sel_wd_weights[tid].append(list(zip(wts, wds)))
+
+            post_wts, _ = list(zip(*sel_weighted_posts[tid]))
+            sel_post_wd_weights[tid] = list(zip(post_wts, sel_wd_weights[tid])) # tid: [(post_wt, [(wd_wt, wd), ...]), ...]
+
             # Take top 5 and bottom 5 posts
-            sel_weighted_posts[tid] = sel_weighted_posts[tid][:5] + [(0, '~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')] + sel_weighted_posts[tid][-5:]
+            sel_post_wd_weights[tid] = sorted(sel_post_wd_weights[tid], reverse=True)
+            sel_post_wd_weights[tid] = sel_post_wd_weights[tid][:5]+ sel_post_wd_weights[tid][-5:]
 
         # Format posts as HTML string
         post_strings = []
-        for tid in sel_weighted_posts.keys():
-            post_str = '<br><br>'.join([html.escape(post) for _,post in sel_weighted_posts[tid]])
-            post_strings.append(post_str)
+        for tid in sel_post_wd_weights.keys():
+            max_wt = max([el[0] for post in sel_wd_weights[tid] for el in post])
+            min_wt = min([el[0] for post in sel_wd_weights[tid] for el in post])
+    
+            wd_wts = sel_wd_weights[tid]
+
+            posts_str = ''
+            for i, (post_wt, wd_wt_list) in enumerate(sel_post_wd_weights[tid]):
+                if len(wd_wt_list) == 0:
+                    continue
+
+                wts, wds = list(zip(*wd_wt_list))
+                post_str = self._color_post(wds, wts, max_wt, min_wt)
+                posts_str += post_str + '<br><br>'
+
+                if i == 4:
+                    posts_str += '~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~<br><br>'
+
+            post_strings.append(posts_str)
 
         post_str_df = pd.DataFrame(list(zip(tids, post_strings)), columns=['tumblog_id', 'ranked_post_str'])
-        post_str_df = post_str_df.sample(50) # downsample
+        #post_str_df['ranked_post_str'] = post_str_df['ranked_post_str'].str.wrap(100)# word wrap
+        post_str_df = post_str_df.sample(50, random_state=7) # downsample
 
         # Get desciption, predicted and gold category labels
         columns = ['tumblog_id', 'restr_segments_25', 'ranked_post_str']
@@ -496,12 +552,13 @@ class HAN():
         merged.drop_duplicates(subset=['tumblog_id'], inplace=True)
 
         # Select columns
-        sel_cols = ['tumblog_id', 'restr_segments_25', 'ranked_post_str', 'predicted_categories', 'actual_categories']
+        sel_cols = ['tumblog_id', 'restr_segments_25', 'predicted_categories', 'actual_categories', 'ranked_post_str']
         merged = merged.loc[:, sel_cols]
 
         # Save table as HTML
-        pd.set_option('display.max_colwidth', -1)
-        s = merged.style.set_properties(**{'vertical-align': 'top', 'border': '1px solid gray', 'border-collapse': 'collapse'})
+        pd.set_option('display.max_colwidth', 500)
+        s = merged.style.set_properties(**{'vertical-align': 'top', 'border': '1px solid gray', 'border-collapse': 'collapse',
+            'word-wrap': 'break-word'})
         html_tab = s.render()
         outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_viz.html")
         with open(outpath, 'w') as f:
@@ -515,7 +572,11 @@ class HAN():
         with open(path, 'rb') as f:
             weight_list = pickle.load(f)
 
-        return weight_list
+        word_path = os.path.join(self.output_dirpath, f"model_{self.model_name}_word_attn_weights.pkl")
+        with open(word_path, 'rb') as f:
+            word_weight_list = pickle.load(f)
+
+        return word_weight_list, weight_list
 
 
 def main():
@@ -566,6 +627,7 @@ def main():
         sys.stdout.flush()
         han.build_model(dh.max_num_words, dh.embedding_dim, dh.max_post_length, dh.max_num_posts)
         print('done.')
+        han.model.summary()
         sys.stdout.flush()
 
         # Train model
@@ -576,7 +638,7 @@ def main():
         sys.stdout.flush()
 
         # Save model
-        han.save_model(model_dirpath)
+        han.save_model()
 
     # Evaluate
     print("Evaluating model...", end=" ")
@@ -584,12 +646,12 @@ def main():
     pred_df, scores = han.evaluate(X_dev, 'dev', tids_dev,  y_dev, dh.cats)
     print("done.")
     sys.stdout.flush()
-    pprint(scores)
+    #pprint(scores)
 
     if args.load_attn:
         print("Loading attention weights...", end=' ')
         sys.stdout.flush()
-        post_attn_weights = han.load_attention_weights()
+        word_attn_weights, post_attn_weights = han.load_attention_weights()
         print("done.")
         sys.stdout.flush()
 
@@ -598,12 +660,13 @@ def main():
         print("Getting attention weights...", end=" ")
         sys.stdout.flush()
         post_attn_weights = han.post_attention_weights(X_dev)
+        word_attn_weights = han.word_attention_weights(X_dev)
         print('done.')
         sys.stdout.flush()
 
     print("Making attention weight visualization...", end=" ")
     sys.stdout.flush()
-    han.post_attention_visualization(post_attn_weights, tids_dev, dh, descs_path, posts_path, pred_df)
+    han.attention_visualization(post_attn_weights, word_attn_weights, tids_dev, dh, descs_path, posts_path, pred_df)
     print('done.')
     sys.stdout.flush()
 
