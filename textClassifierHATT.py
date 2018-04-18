@@ -20,14 +20,14 @@ from pprint import pprint
 os.environ['KERAS_BACKEND']='theano'
 
 # Use CPU
-#os.environ['THEANO_FLAGS'] = 'device=cpu'
+os.environ['THEANO_FLAGS'] = 'device=cpu'
 
 # Use GPU
-os.environ['CUDA_VISIBLE_DEVICES']='0'
-os.environ['THEANO_FLAGS'] = 'device=cuda'
-os.environ['THEANO_FLAGS'] = 'floatX=float32'
-os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
-os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+#os.environ['CUDA_VISIBLE_DEVICES']='0'
+#os.environ['THEANO_FLAGS'] = 'device=cuda'
+#os.environ['THEANO_FLAGS'] = 'floatX=float32'
+#os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+#os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
 
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.preprocessing.sequence import pad_sequences
@@ -45,8 +45,7 @@ from sklearn.metrics import cohen_kappa_score, precision_score, recall_score, f1
 
 
 class DataHandler():
-    """ For loading and preprocessing data.
-        Might be good to be able to serialize (at least essentials). """
+    """ For loading and preprocessing data.  """
 
     def __init__(self, data_dirpath,
                 max_num_posts=100, 
@@ -63,7 +62,10 @@ class DataHandler():
         self.descs = None
         self.posts = None
         self.tids = None
+        self.tids_split = {}
         self.cats = None
+        self.X = {}
+        self.y = {}
         self.name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
         self.data_dirpath = data_dirpath # where will save processed data
 
@@ -109,56 +111,46 @@ class DataHandler():
         # Shuffle, split into train/dev/test
         test_size = int(self.test_dev_split * len(data))
         #indices = np.arange(len(data))
-        X_train, X_test, y_train, y_test, tids_train, tids_test = train_test_split(data, labels, self.tids, test_size=test_size, random_state=0)
+        X_train, self.X['test'], y_train, self.y['test'], \
+                tids_train, self.tids_split['text'] = \
+            train_test_split(data, labels, self.tids, test_size=test_size, random_state=0)
 
-        X_train, X_dev, y_train, y_dev, tids_train, tids_dev = train_test_split(X_train, y_train, tids_train, test_size=test_size, random_state=0)
+        self.X['train'], self.X['dev'], self.y['train'], self.y['dev'], tids_train, self.tids_split['dev'] = train_test_split(X_train, y_train, tids_train, test_size=test_size, random_state=0)
 
         # Save vectorized data
-        vectorized_datapath = os.path.join(self.data_dirpath, f"{self.name}_preprocessed_data")
         if save:
-            np.savez_compressed(vectorized_datapath, 
-                    X_train=X_train,
-                    X_dev=X_dev,
-                    X_test=X_test,
-                    y_train=y_train,
-                    y_dev=y_dev,
-                    y_test=y_test,
-                    tids_train=tids_train,
-                    tids_dev=tids_dev,
-                    tids_test=tids_test,
-                    cats=self.cats
-                    )
-    
+            vectorized_datapath = os.path.join(self.data_dirpath, f"{self.name}_preprocessed_data.pkl")
+            with open(vectorized_datapath, 'wb') as f:
+                pickle.dump(self, f)
+
         print("done.")
         sys.stdout.flush()
 
-        print(f"Saved preprocessed data to {vectorized_datapath}.npz")        
+        print(f"Saved preprocessed data to {vectorized_datapath}")        
         sys.stdout.flush()
         
-        return X_train, X_dev, X_test, y_train, y_dev, y_test
 
+    def load_processed_data(self, name):
+        """ Load preprocessed DataHandler object """
 
-    def load_processed_data(self, dataname):
-        datapath = os.path.join(self.data_dirpath, f"{dataname}_preprocessed_data.npz")
-        loaded = np.load(datapath)
-        X_train, X_dev, X_test, y_train, y_dev, y_test, tids_train, tids_dev, tids_test, self.cats = \
-            loaded['X_train'], loaded['X_dev'], loaded['X_test'], loaded['y_train'], loaded['y_dev'], loaded['y_train'], loaded['tids_train'], loaded['tids_dev'], loaded['tids_test'], loaded['cats']
+        vectorized_datapath = os.path.join(self.data_dirpath, f"{name}_preprocessed_data.pkl")
+        with open(vectorized_datapath, 'rb') as f:
+            tmp = pickle.load(f)
 
-        return X_train, X_dev, X_test, y_train, y_dev, y_test, tids_train, tids_dev, tids_test
+        self.__dict__.update(tmp)
 
-
-    def print_info(self, X_train, X_dev, X_test, y_train, y_dev, y_test):
+    def print_info(self):
     
         # Number of samples
         print()
-        print("# training instances: {}".format(len(X_train)))
-        print("# dev instances: {}".format(len(X_dev)))
-        print("# test instances: {}".format(len(X_test)))
+        print("# training instances: {}".format(len(self.X['train'])))
+        print("# dev instances: {}".format(len(self.X['dev'])))
+        print("# test instances: {}".format(len(self.X['test'])))
         print()
 
         # Shapes of tensors
-        print("Shape of training feature tensor: {}".format(X_train.shape))
-        print("Shape of training labels tensor: {}".format(y_train.shape))
+        print("Shape of training feature tensor: {}".format(self.X['train'].shape))
+        print("Shape of training labels tensor: {}".format(self.y['train'].shape))
         print()
 
 
@@ -471,12 +463,9 @@ class HAN():
     
 
     def attention_visualization(self, post_weights, word_weights, tids, dh, descs_path, posts_path, pred_df,
-        multiply_weights=False):
+        multiply_weights=False, by_category=False):
         """ Max word weights are set from max word weight per blog """
         
-        # Don't do this later when serialize dh object
-        dh.load_data(descs_path, posts_path)
-
         # Select posts by blog
         sel_posts = {}
         sel_weighted_posts = {}
@@ -535,14 +524,14 @@ class HAN():
 
         post_str_df = pd.DataFrame(list(zip(tids, post_strings)), columns=['tumblog_id', 'ranked_post_str'])
         #post_str_df['ranked_post_str'] = post_str_df['ranked_post_str'].str.wrap(100)# word wrap
-        post_str_df = post_str_df.sample(50, random_state=7) # downsample
+        #post_str_df = post_str_df.sample(50, random_state=7) # downsample
 
         # Get desciption, predicted and gold category labels
-        columns = ['tumblog_id', 'restr_segments_25', 'ranked_post_str']
+        columns = ['tumblog_id', 'restr_segments_25', 'ranked_post_str'] + [f'{cat}_terms' for cat in dh.cats]
         merged = pd.merge(dh.descs, dh.posts, on='tumblog_id')
         merged = pd.merge(merged, post_str_df, on='tumblog_id').loc[:, columns]
 
-        # Merge with preditions, actual category values
+        # Merge with predictions, actual category values
         merged = pd.merge(merged, pred_df, on='tumblog_id')
         slice_preds = merged.loc[:, [f'pred_{cat}' for cat in dh.cats]]
         preds_true = slice_preds.apply(lambda x: x > 0)
@@ -555,22 +544,46 @@ class HAN():
         # Drop duplicates
         merged.drop_duplicates(subset=['tumblog_id'], inplace=True)
 
-        # Select columns
-        sel_cols = ['tumblog_id', 'restr_segments_25', 'predicted_categories', 'actual_categories', 'ranked_post_str']
-        merged = merged.loc[:, sel_cols]
+        # Separate by category
+        if by_category:
+            cats = list(dh.cats) + ['all', 'none']
+        else:
+            cats = ['all']
 
-        # Save table as HTML
-        pd.set_option('display.max_colwidth', 500)
-        s = merged.style.set_properties(**{'vertical-align': 'top', 'border': '1px solid gray', 'border-collapse': 'collapse',
-            'word-wrap': 'break-word'})
-        html_tab = s.render()
-        outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_viz.html")
-        with open(outpath, 'w') as f:
-            f.write(html_tab)
+        for cat in cats:
 
-        #merged.to_html(outpath, escape=False)
+            # Select data based on category
+            if cat == 'none':
+                mask = [len(tup[0])==0 or len(tup[1])==0 for tup in zip(merged['predicted_categories'], merged['actual_categories'])]
+                cat_df = merged[mask]
 
+            elif cat != 'all':
+                mask = [(f'pred_{cat}' in tup[0]) or (f'actual_{cat}' in tup[1]) for tup in zip(merged['predicted_categories'], merged['actual_categories'])]
+                cat_df = merged[mask]
+
+            # Select columns
+            sel_cols = ['tumblog_id', 'restr_segments_25', 'predicted_categories', 'actual_categories', 'ranked_post_str'] + [f'{cat}_terms' for cat in dh.cats]
+            cat_df = cat_df.loc[:, sel_cols]
+
+            if len(cat_df) > 50:
+                cat_df = cat_df.sample(50, random_state=7) # downsample
+
+            if not cat in ['all', 'none']:
+                cat_df.sort_values([f'{cat}_terms', 'predicted_categories'], inplace=True, ascending=False)
+
+            # Save table as HTML
+            pd.set_option('display.max_colwidth', 500)
+            s = cat_df.style.set_properties(**{'vertical-align': 'top', 'border': '1px solid gray', 'border-collapse': 'collapse',
+                'word-wrap': 'break-word'})
+            html_tab = s.render()
+            out_dirpath = os.path.join(self.output_dirpath, self.model_name)
+            if not os.path.exists(out_dirpath):
+                os.mkdir(out_dirpath)
+            outpath = os.path.join(out_dirpath, f"model_{self.model_name}_{cat.replace('/', '-')}_attn_viz.html")
+            with open(outpath, 'w') as f:
+                f.write(html_tab)
         
+
     def load_attention_weights(self):
         path = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_weights.pkl")
         with open(path, 'rb') as f:
@@ -583,6 +596,7 @@ class HAN():
         return word_weight_list, weight_list
 
 
+
 def main():
 
     parser = argparse.ArgumentParser(description="Train and run hierarchical attention network")
@@ -593,25 +607,26 @@ def main():
     args = parser.parse_args()
 
     base_dirpath = args.base_dirpath
+    data_dirpath = os.path.join(base_dirpath, 'data')
     descs_path = os.path.join(base_dirpath, 'data/list_descriptions_100posts.pkl')
     posts_path = os.path.join(base_dirpath, 'data/textposts_recent100_100posts.pkl')
 
     # Load, preprocess data
-    dh = DataHandler(os.path.join(base_dirpath, 'data'), max_num_words=100000)
-
     if args.dataname:
         # Load preprocessed, vectorized data
-        X_train, X_dev, X_test, y_train, y_dev, y_test, tids_train, tids_dev, tids_test = dh.load_processed_data(args.dataname)
+        dh = DataHandler(data_dirpath)
+        dh.load_processed_data(args.dataname)
     
     else:
         print("Loading data...", end=' ')
         sys.stdout.flush()
+        dh = DataHandler(data_dirpath, max_num_words=100000)
         dh.load_data(descs_path, posts_path)
         print("done.")
         sys.stdout.flush()
-        X_train, X_dev, X_test, y_train, y_dev, y_test = dh.process_data()
-
-    dh.print_info(X_train, X_dev, X_test, y_train, y_dev, y_test)
+        dh.process_data()
+        
+        dh.print_info()
 
     han = HAN(base_dirpath)
 
@@ -670,7 +685,7 @@ def main():
 
     print("Making attention weight visualization...", end=" ")
     sys.stdout.flush()
-    han.attention_visualization(post_attn_weights, word_attn_weights, tids_dev, dh, descs_path, posts_path, pred_df, multiply_weights=True)
+    han.attention_visualization(post_attn_weights, word_attn_weights, tids_dev, dh, descs_path, posts_path, pred_df, multiply_weights=True, by_category=True)
     print('done.')
     sys.stdout.flush()
 
