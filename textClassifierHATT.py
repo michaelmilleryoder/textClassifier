@@ -120,8 +120,13 @@ class DataHandler():
         # Save vectorized data
         if save:
             vectorized_datapath = os.path.join(self.data_dirpath, f"{self.name}_preprocessed_data.pkl")
+
+            dict_save = self.__dict__.copy()
+            dict_save.pop('descs')
+            dict_save.pop('posts')
+
             with open(vectorized_datapath, 'wb') as f:
-                pickle.dump(self, f)
+                pickle.dump(dict_save, f)
 
         print("done.")
         sys.stdout.flush()
@@ -615,7 +620,12 @@ def main():
     if args.dataname:
         # Load preprocessed, vectorized data
         dh = DataHandler(data_dirpath)
+        
+        print("Loading preprocessed data...", end=' ')
+        sys.stdout.flush()
         dh.load_processed_data(args.dataname)
+        print("done.")
+        sys.stdout.flush()
     
     else:
         print("Loading data...", end=' ')
