@@ -20,14 +20,14 @@ from pprint import pprint
 os.environ['KERAS_BACKEND']='theano'
 
 # Use CPU
-os.environ['THEANO_FLAGS'] = 'device=cpu'
+#os.environ['THEANO_FLAGS'] = 'device=cpu'
 
 # Use GPU
-#os.environ['CUDA_VISIBLE_DEVICES']='0'
-#os.environ['THEANO_FLAGS'] = 'device=cuda'
-#os.environ['THEANO_FLAGS'] = 'floatX=float32'
-#os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
-#os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+os.environ['CUDA_VISIBLE_DEVICES']='4'
+os.environ['THEANO_FLAGS'] = 'device=cuda'
+os.environ['THEANO_FLAGS'] = 'floatX=float32'
+os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
 
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.preprocessing.sequence import pad_sequences
@@ -48,6 +48,7 @@ class DataHandler():
     """ For loading and preprocessing data.  """
 
     def __init__(self, data_dirpath,
+                name=datetime.datetime.now().strftime('%Y-%m-%dT%H-%M'),
                 max_num_posts=100, 
                 max_post_length=200, 
                 max_num_words = 50000,
@@ -66,7 +67,7 @@ class DataHandler():
         self.cats = None
         self.X = {}
         self.y = {}
-        self.name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
+        self.name = name
         self.data_dirpath = data_dirpath # where will save processed data
 
     def load_data(self, descs_filepath, posts_filepath):
@@ -76,7 +77,7 @@ class DataHandler():
         self.posts = pd.read_pickle(posts_filepath)
         self.tids = sorted(self.descs['tumblog_id'].tolist())
 
-    def process_data(self, save=True):
+    def process_data(self, outcome_colname='all', save=True):
         """ Preprocesses data and returns vectorized form """
         print("Preprocessing data...", end=" ")
         sys.stdout.flush()
@@ -104,13 +105,18 @@ class DataHandler():
                             k=k+1                    
 
         # Prepare description categories (labels)
-        self.cats = self.descs.columns.tolist()[-8:]
-        labels = np.array(list(zip(*[self.descs[cat] for cat in self.cats])))
-        #labels = to_categorical(np.array(labels, dtype=int))
+        if outcome_colname == 'all':
+            self.cats = self.descs.columns.tolist()[-8:]
+
+        else:
+            self.cats = [outcome_colname] # can only handle 1 colname
+        
+            labels = np.array(list(zip(*[self.descs[cat] for cat in self.cats])))
+        if len(self.cats) == 1:
+            labels = to_categorical(np.array(labels, dtype=int)) 
 
         # Shuffle, split into train/dev/test
         test_size = int(self.test_dev_split * len(data))
-        #indices = np.arange(len(data))
         X_train, self.X['test'], y_train, self.y['test'], \
                 tids_train, self.tids_split['text'] = \
             train_test_split(data, labels, self.tids, test_size=test_size, random_state=0)
@@ -220,7 +226,8 @@ class HAN():
         return embedding_layer
 
 
-    def build_model(self, vocab_size, embedding_dim, max_post_length, max_num_posts, embeddings='tumblr_halfday'):
+    def build_model(self, vocab_size, embedding_dim, max_post_length, max_num_posts, 
+        embeddings='tumblr_halfday', n_outcomes=8):
         
         embedding_layer = self._build_embedding_layer(vocab_size, embedding_dim, max_post_length, embeddings)
 
@@ -236,7 +243,11 @@ class HAN():
         l_lstm_post = Bidirectional(GRU(100, return_sequences=True))(blog_encoder)
         l_dense_post = TimeDistributed(Dense(200))(l_lstm_post)
         l_att_post = AttLayer()(l_dense_post)
-        preds = Dense(8, activation='sigmoid')(l_att_post)
+
+        if n_outcomes==1:
+            preds = Dense(2, activation='softmax')(l_att_post)
+        else:
+            preds = Dense(n_outcomes, activation='sigmoid')(l_att_post)
         model = Model(blog_input, preds)
 
         model.compile(loss='binary_crossentropy',
@@ -261,8 +272,11 @@ class HAN():
         self.post_encoder = load_model(post_encoder_path, custom_objects={'AttLayer': AttLayer})
 
 
-    def save_model(self):
-        self.model_name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
+    def save_model(self, name=None):
+        if name:
+            self.model_name = f'{name}_{datetime.datetime.now().strftime("%Y-%m-%dT%H-%M")}'
+        else:
+            self.model_name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
 
         # Save main model
         outpath = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{self.model_name}.h5")
@@ -422,7 +436,6 @@ class HAN():
 
         pred_df.to_pickle(pred_path)
 
-        assert y.shape[1] == len(cats)
         scores = {}
 
         # Per-category scores
@@ -606,8 +619,10 @@ def main():
 
     parser = argparse.ArgumentParser(description="Train and run hierarchical attention network")
     parser.add_argument('base_dirpath', nargs='?', help="Path to directory with data, where should save models and output")
+    parser.add_argument('--dataset-name', nargs='?', dest='dataname', help="Name to save preprocessed data to")
+    parser.add_argument('--outcome', nargs='?', dest='outcome_colname', help="Name of column/s to predict")
     parser.add_argument('--load-model', nargs='?', dest='model_name')
-    parser.add_argument('--load-data', nargs='?', dest='dataname', help="Timestamp name of preprocessed data")
+    parser.add_argument('--load-data', nargs='?', dest='load_dataname', help="Timestamp name of preprocessed data")
     parser.add_argument('--load-attn', dest='load_attn', action='store_true')
     args = parser.parse_args()
 
@@ -616,25 +631,33 @@ def main():
     descs_path = os.path.join(base_dirpath, 'data/list_descriptions_100posts.pkl')
     posts_path = os.path.join(base_dirpath, 'data/textposts_recent100_100posts.pkl')
 
+    if args.outcome_colname:
+        outcome_colname = args.outcome_colname
+    else:
+        outcome_colname = 'all'
+
     # Load, preprocess data
-    if args.dataname:
+    if args.load_dataname:
         # Load preprocessed, vectorized data
         dh = DataHandler(data_dirpath)
         
         print("Loading preprocessed data...", end=' ')
         sys.stdout.flush()
-        dh.load_processed_data(args.dataname)
+        dh.load_processed_data(args.load_dataname)
         print("done.")
         sys.stdout.flush()
     
     else:
         print("Loading data...", end=' ')
         sys.stdout.flush()
-        dh = DataHandler(data_dirpath, max_num_words=100000)
+        if args.dataname:
+            dh = DataHandler(data_dirpath, name=args.dataname, max_num_words=100000)
+        else:
+            dh = DataHandler(data_dirpath, max_num_words=100000)
         dh.load_data(descs_path, posts_path)
         print("done.")
         sys.stdout.flush()
-        dh.process_data()
+        dh.process_data(outcome_colname=outcome_colname)
         
         dh.print_info()
 
@@ -654,7 +677,10 @@ def main():
         # Build model
         print("Building model...", end=' ')
         sys.stdout.flush()
-        han.build_model(dh.max_num_words, dh.embedding_dim, dh.max_post_length, dh.max_num_posts)
+        if args.outcome_colname:
+            han.build_model(dh.max_num_words, dh.embedding_dim, dh.max_post_length, dh.max_num_posts, n_outcomes=1)
+        else:
+            han.build_model(dh.max_num_words, dh.embedding_dim, dh.max_post_length, dh.max_num_posts)
         print('done.')
         han.model.summary()
         sys.stdout.flush()
@@ -662,17 +688,20 @@ def main():
         # Train model
         print("\nTraining model...", end=' ')
         sys.stdout.flush()
-        han.train_model(X_train, y_train, X_dev, y_dev)
+        han.train_model(dh.X['train'], dh.y['train'], dh.X['dev'], dh.y['dev'])
         print('done.')
         sys.stdout.flush()
 
         # Save model
-        han.save_model()
+        if args.outcome_colname:
+            han.save_model()
+        else:
+            han.save_model(name=args.outcome_colname)
 
     # Evaluate
     print("Evaluating model...", end=" ")
     sys.stdout.flush()
-    pred_df, scores = han.evaluate(X_dev, 'dev', tids_dev,  y_dev, dh.cats)
+    pred_df, scores = han.evaluate(dh.X['dev'], 'dev', dh.tids_split['dev'], dh.y['dev'], dh.cats)
     print("done.")
     sys.stdout.flush()
     #pprint(scores)
@@ -688,8 +717,8 @@ def main():
         # Save attention weight visualization
         print("Getting attention weights...", end=" ")
         sys.stdout.flush()
-        post_attn_weights = han.post_attention_weights(X_dev)
-        word_attn_weights = han.word_attention_weights(X_dev)
+        post_attn_weights = han.post_attention_weights(dh.X['dev'])
+        word_attn_weights = han.word_attention_weights(dh.X['dev'])
         print('done.')
         sys.stdout.flush()
 
