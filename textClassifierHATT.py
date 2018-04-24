@@ -31,6 +31,7 @@ os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
 
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.preprocessing.sequence import pad_sequences
+from keras.callbacks import ModelCheckpoint
 from keras.utils.np_utils import to_categorical
 from keras.layers import Embedding
 from keras.layers import Dense, Input, Flatten
@@ -43,6 +44,69 @@ from keras import initializers
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import cohen_kappa_score, precision_score, recall_score, f1_score
 
+
+class SaveBestModel(ModelCheckpoint):
+    """ Keras callback with custom save function """
+
+    def __init__(self, model_container, 
+                 monitor='val_loss', verbose=0,
+                 save_best_only=False,
+                 mode='auto', period=1):
+        self.model_container = model_container
+        self.monitor = monitor
+        self.verbose = verbose
+        self.save_best_only = save_best_only
+        self.period = period
+        self.epochs_since_last_save = 0
+
+        if mode not in ['auto', 'min', 'max']:
+            warnings.warn('ModelCheckpoint mode %s is unknown, '
+                          'fallback to auto mode.' % (mode),
+                          RuntimeWarning)
+            mode = 'auto'
+
+        if mode == 'min':
+            self.monitor_op = np.less
+            self.best = np.Inf
+        elif mode == 'max':
+            self.monitor_op = np.greater
+            self.best = -np.Inf
+        else:
+            if 'acc' in self.monitor or self.monitor.startswith('fmeasure'):
+                self.monitor_op = np.greater
+                self.best = -np.Inf
+            else:
+                self.monitor_op = np.less
+                self.best = np.Inf
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        self.epochs_since_last_save += 1
+        if self.epochs_since_last_save >= self.period:
+            self.epochs_since_last_save = 0
+            if self.save_best_only:
+                current = logs.get(self.monitor)
+                if current is None:
+                    warnings.warn('Can save best model only with %s available, '
+                                  'skipping.' % (self.monitor), RuntimeWarning)
+                else:
+                    if self.monitor_op(current, self.best):
+                        if self.verbose > 0:
+                            print('\nEpoch %05d: %s improved from %0.5f to %0.5f,'
+                                  ' saving model'
+                                  % (epoch + 1, self.monitor, self.best,
+                                     current))
+                        self.best = current
+                        self.model_container.save_model()
+                    else:
+                        if self.verbose > 0:
+                            print('\nEpoch %05d: %s did not improve from %0.5f' %
+                                  (epoch + 1, self.monitor, self.best))
+            else:
+                if self.verbose > 0:
+                    print('\nEpoch %05d: saving model' % (epoch + 1))
+
+                self.model_container.save_model()
 
 class DataHandler():
     """ For loading and preprocessing data.  """
@@ -112,8 +176,8 @@ class DataHandler():
             self.cats = [outcome_colname] # can only handle 1 colname
         
             labels = np.array(list(zip(*[self.descs[cat] for cat in self.cats])))
-        if len(self.cats) == 1:
-            labels = to_categorical(np.array(labels, dtype=int)) 
+#        if len(self.cats) == 1:
+#            labels = to_categorical(np.array(labels, dtype=int)) 
 
         # Shuffle, split into train/dev/test
         test_size = int(self.test_dev_split * len(data))
@@ -196,18 +260,23 @@ class AttLayer(Layer):
     def compute_output_shape(self, input_shape):
         return (input_shape[0], input_shape[-1])
 
+
 class HAN():
     """ Hierarchical Attention Network """
 
-    def __init__(self, base_dirpath):
+    def __init__(self, base_dirpath, name=None):
         self.model = None
-        self.model_name = None
+        if name:
+            self.model_name = f'{name}_{datetime.datetime.now().strftime("%Y-%m-%dT%H-%M")}'
+        else:
+            self.model_name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
         self.base_dirpath = base_dirpath
         self.model_dirpath = os.path.join(base_dirpath, 'models')
-        self.output_dirpath = os.path.join(base_dirpath, 'output')
+        self.output_dirpath = os.path.join(base_dirpath, 'output', self.model_name)
         self.embeddings_paths = {
             'tumblr_halfday': os.path.join(base_dirpath, 'data/recent100_100posts_embeds.npy')
             }
+
 
     def _build_embedding_layer(self, vocab_size, embedding_dim,max_post_length, embeddings):
 
@@ -244,10 +313,8 @@ class HAN():
         l_dense_post = TimeDistributed(Dense(200))(l_lstm_post)
         l_att_post = AttLayer()(l_dense_post)
 
-        if n_outcomes==1:
-            preds = Dense(2, activation='softmax')(l_att_post)
-        else:
-            preds = Dense(n_outcomes, activation='sigmoid')(l_att_post)
+        #preds = Dense(2, activation='softmax')(l_att_post)
+        preds = Dense(n_outcomes, activation='sigmoid')(l_att_post)
         model = Model(blog_input, preds)
 
         model.compile(loss='binary_crossentropy',
@@ -259,8 +326,9 @@ class HAN():
 
 
     def train_model(self, X_train, y_train, X_dev, y_dev, epochs=10, batch_size=16):
+        callbacks = [SaveBestModel(self, monitor='val_acc', save_best_only=True)]
         self.model.fit(X_train, y_train, validation_data=(X_dev, y_dev),
-              epochs=epochs, batch_size=batch_size)
+              epochs=epochs, batch_size=batch_size, callbacks=callbacks)
 
 
     def load_model(self, model_name):
@@ -272,11 +340,7 @@ class HAN():
         self.post_encoder = load_model(post_encoder_path, custom_objects={'AttLayer': AttLayer})
 
 
-    def save_model(self, name=None):
-        if name:
-            self.model_name = f'{name}_{datetime.datetime.now().strftime("%Y-%m-%dT%H-%M")}'
-        else:
-            self.model_name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
+    def save_model(self):
 
         # Save main model
         outpath = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{self.model_name}.h5")
@@ -358,7 +422,9 @@ class HAN():
 
 
     def _set_scores(self, preds, actual):
-        """ Returns set measures of precision, recall and f1 """
+        """ Returns set measures of precision, recall and f1.
+            Might be able to do the same thing with scikit learn average='macro' with eg precision_score.
+            """
         
         precisions = []
         recalls = []
@@ -421,7 +487,9 @@ class HAN():
             Args:
                 * cats: list of names of categories, in the order of labeled instances in y
         """
+
         preds = self.predict(X)
+
         preds[preds>=0.5] = True
         preds[preds<0.5] = False
 
@@ -449,10 +517,13 @@ class HAN():
         outlines = [['all'] + [scores['set'][m] for m in metrics[:-1]], \
                     *[[c] + [scores['category'][c][m] for m in metrics] for c in cats]]
         outlines = pd.DataFrame(outlines, columns=['category'] + metrics)
+        if not os.path.exists(self.output_dirpath):
+            os.mkdir(self.output_dirpath)
         outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_scores.csv")
         outlines.to_csv(outpath, index=False)
 
         return pred_df, scores
+
 
     def _color_attention(self, wts, total_max, total_min):
         """ Returns 0-1 for highlighting """
@@ -484,6 +555,10 @@ class HAN():
         multiply_weights=False, by_category=False):
         """ Max word weights are set from max word weight per blog """
         
+        # Load data
+        dh.descs = pd.read_pickle(descs_path)
+        dh.posts = pd.read_pickle(posts_path)
+
         # Select posts by blog
         sel_posts = {}
         sel_weighted_posts = {}
@@ -587,17 +662,15 @@ class HAN():
                 cat_df = cat_df.sample(50, random_state=7) # downsample
 
             if not cat in ['all', 'none']:
-                cat_df.sort_values([f'{cat}_terms', 'predicted_categories'], inplace=True, ascending=False)
+                cat_df.sort_values([f'pred_{cat}', f'actual_{cat}', f'{cat}_terms'], inplace=True, ascending=False) # error when try to sort by multiple list columns
+                #cat_df.sort_values([f'{cat}_terms', 'predicted_categories'], inplace=True, ascending=False) # error when try to sort by multiple list columns
 
             # Save table as HTML
             pd.set_option('display.max_colwidth', 500)
             s = cat_df.style.set_properties(**{'vertical-align': 'top', 'border': '1px solid gray', 'border-collapse': 'collapse',
                 'word-wrap': 'break-word'})
             html_tab = s.render()
-            out_dirpath = os.path.join(self.output_dirpath, self.model_name)
-            if not os.path.exists(out_dirpath):
-                os.mkdir(out_dirpath)
-            outpath = os.path.join(out_dirpath, f"model_{self.model_name}_{cat.replace('/', '-')}_attn_viz.html")
+            outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_{cat.replace('/', '-')}_attn_viz.html")
             with open(outpath, 'w') as f:
                 f.write(html_tab)
         
@@ -614,7 +687,6 @@ class HAN():
         return word_weight_list, weight_list
 
 
-
 def main():
 
     parser = argparse.ArgumentParser(description="Train and run hierarchical attention network")
@@ -624,6 +696,7 @@ def main():
     parser.add_argument('--load-model', nargs='?', dest='model_name')
     parser.add_argument('--load-data', nargs='?', dest='load_dataname', help="Timestamp name of preprocessed data")
     parser.add_argument('--load-attn', dest='load_attn', action='store_true')
+    parser.set_defaults(outcome_colname=None)
     args = parser.parse_args()
 
     base_dirpath = args.base_dirpath
@@ -661,7 +734,7 @@ def main():
         
         dh.print_info()
 
-    han = HAN(base_dirpath)
+    han = HAN(base_dirpath, name=args.outcome_colname)
 
     if args.model_name:
         
@@ -693,10 +766,7 @@ def main():
         sys.stdout.flush()
 
         # Save model
-        if args.outcome_colname:
-            han.save_model()
-        else:
-            han.save_model(name=args.outcome_colname)
+        han.save_model()
 
     # Evaluate
     print("Evaluating model...", end=" ")
@@ -724,7 +794,7 @@ def main():
 
     print("Making attention weight visualization...", end=" ")
     sys.stdout.flush()
-    han.attention_visualization(post_attn_weights, word_attn_weights, tids_dev, dh, descs_path, posts_path, pred_df, multiply_weights=True, by_category=True)
+    han.attention_visualization(post_attn_weights, word_attn_weights, dh.tids_split['dev'], dh, descs_path, posts_path, pred_df, multiply_weights=True, by_category=True)
     print('done.')
     sys.stdout.flush()
 
