@@ -108,6 +108,7 @@ class SaveBestModel(ModelCheckpoint):
 
                 self.model_container.save_model()
 
+
 class DataHandler():
     """ For loading and preprocessing data.  """
 
@@ -428,35 +429,40 @@ class HAN():
         
         precisions = []
         recalls = []
+
+        total_prec = precision_score(actual, preds, average='weighted')
+        total_rec = recall_score(actual, preds, average='weighted')
+        total_f1 = f1_score(actual, preds, average='weighted')
         
-        for pred, act in zip(preds, actual):
-            pred_labels = set(np.flatnonzero(pred)) # binary encoding to indices
-            actual_labels = set(np.flatnonzero(act))
-            correct = pred_labels.intersection(actual_labels)
-            
-            # precision
-            if len(pred_labels) == 0:
-                if len(actual_labels) == 0:
-                    prec = 1.0 # Case where no labels predicted and actually are no labels
-                else: 
-                    prec = 0.0
-            else:
-                prec = len(correct)/len(pred_labels)
-            precisions.append(prec)
-            
-            # recall
-            if len(actual_labels) == 0:
-                if len(pred_labels) == 0:
-                    rec = 1.0 # Case where no labels predicted and actually are no labels
-                else:
-                    rec = 0.0
-            else:
-                rec = len(correct)/len(actual_labels)
-            recalls.append(rec)
-            
-        total_prec = np.mean(precisions)
-        total_rec = np.mean(recalls)
-        total_f1 = 2 * total_prec * total_rec / (total_prec + total_rec)
+        # Old way--flawed
+        #for pred, act in zip(preds, actual):
+        #    pred_labels = set(np.flatnonzero(pred)) # binary encoding to indices
+        #    actual_labels = set(np.flatnonzero(act))
+        #    correct = pred_labels.intersection(actual_labels)
+        #    
+        #    # precision
+        #    if len(pred_labels) == 0:
+        #        if len(actual_labels) == 0:
+        #            prec = 1.0 # Case where no labels predicted and actually are no labels
+        #        else: 
+        #            prec = 0.0
+        #    else:
+        #        prec = len(correct)/len(pred_labels)
+        #    precisions.append(prec)
+        #    
+        #    # recall
+        #    if len(actual_labels) == 0:
+        #        if len(pred_labels) == 0:
+        #            rec = 1.0 # Case where no labels predicted and actually are no labels
+        #        else:
+        #            rec = 0.0
+        #    else:
+        #        rec = len(correct)/len(actual_labels)
+        #    recalls.append(rec)
+        #    
+        #total_prec = np.mean(precisions)
+        #total_rec = np.mean(recalls)
+        #total_f1 = 2 * total_prec * total_rec / (total_prec + total_rec)
         
         return {'precision': total_prec,
                 'recall': total_rec,
