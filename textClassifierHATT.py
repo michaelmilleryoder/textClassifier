@@ -27,7 +27,7 @@ os.environ['CUDA_VISIBLE_DEVICES']='4'
 os.environ['THEANO_FLAGS'] = 'device=cuda'
 os.environ['THEANO_FLAGS'] = 'floatX=float32'
 os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
-os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
+#os.environ['LIBRARY_PATH'] = '/usr/local/cuda/lib64'
 
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.preprocessing.sequence import pad_sequences
@@ -117,13 +117,11 @@ class DataHandler():
                 max_num_posts=100, 
                 max_post_length=200, 
                 max_num_words = 50000,
-                embedding_dim = 300,
                 test_dev_split = 0.1):
 
         self.max_num_posts = max_num_posts
         self.max_post_length = max_post_length
         self.max_num_words = max_num_words
-        self.embedding_dim = embedding_dim
         self.test_dev_split = test_dev_split
         self.descs = None
         self.posts = None
@@ -148,7 +146,7 @@ class DataHandler():
         sys.stdout.flush()
 
         # Get text posts
-        posts_by_blog = [[p for p in self.posts[self.posts['tumblog_id']==tid]['body_str_no_titles'].tolist()] for tid in self.tids] # list of 100 posts/user
+        posts_by_blog = [[p for p in self.posts[self.posts['tumblog_id']==tid]['body_toks_str_no_titles'].tolist()] for tid in self.tids] # list of 100 posts/user
         all_posts = [p for posts in posts_by_blog for p in posts]
 
         # Tokenize text posts
@@ -171,12 +169,13 @@ class DataHandler():
 
         # Prepare description categories (labels)
         if outcome_colname == 'all':
-            self.cats = self.descs.columns.tolist()[-8:]
+            cols = self.descs.columns.tolist()
+            self.cats = [c for c in cols[cols.index('parsed_blog_description')+1:] if not c.endswith('terms')]
 
         else:
             self.cats = [outcome_colname] # can only handle 1 colname
         
-            labels = np.array(list(zip(*[self.descs[cat] for cat in self.cats])))
+        labels = np.array(list(zip(*[self.descs[cat] for cat in self.cats])))
 #        if len(self.cats) == 1:
 #            labels = to_categorical(np.array(labels, dtype=int)) 
 
@@ -268,23 +267,28 @@ class HAN():
     def __init__(self, base_dirpath, name=None):
         self.model = None
         if name:
-            self.model_name = f'{name}_{datetime.datetime.now().strftime("%Y-%m-%dT%H-%M")}'
+            self.model_name = name
         else:
             self.model_name = datetime.datetime.now().strftime('%Y-%m-%dT%H-%M')
         self.base_dirpath = base_dirpath
-        self.model_dirpath = os.path.join(base_dirpath, 'models')
+        self.model_dirpath = os.path.join(base_dirpath, 'models', self.model_name)
+        if not os.path.exists(self.model_dirpath):
+            os.mkdir(self.model_dirpath)
         self.output_dirpath = os.path.join(base_dirpath, 'output', self.model_name)
+        if not os.path.exists(self.output_dirpath):
+            os.mkdir(self.output_dirpath)
         self.embeddings_paths = {
-            'tumblr_halfday': os.path.join(base_dirpath, 'data/recent100_100posts_embeds.npy')
-            }
+            'tumblr_halfday': (os.path.join(base_dirpath, 'data/recent100_100posts_embeds.npy'), 300),
+            'tumblr_recent100_fasttext': (os.path.join(base_dirpath, 'data/blog_descriptions_100posts_embeds.npy'), 100)
+            } # name: (fpath, ndims)
 
 
-    def _build_embedding_layer(self, vocab_size, embedding_dim,max_post_length, embeddings):
+    def _build_embedding_layer(self, vocab_size, max_post_length, embeddings):
 
         # Load embeddings
-        #print("Loading pretrained embedding weights...", end=' ')
-        #sys.stdout.flush()
-        vocab_embed = np.load(self.embeddings_paths[embeddings])
+        vocab_embed = np.load(self.embeddings_paths[embeddings][0])
+
+        embedding_dim = self.embeddings_paths[embeddings][1]
         embedding_layer = Embedding(
                             vocab_size,
                             embedding_dim,
@@ -296,10 +300,10 @@ class HAN():
         return embedding_layer
 
 
-    def build_model(self, vocab_size, embedding_dim, max_post_length, max_num_posts, 
-        embeddings='tumblr_halfday', n_outcomes=8):
+    def build_model(self, vocab_size, max_post_length, max_num_posts, 
+        embeddings='tumblr_recent100_fasttext', n_outcomes=8):
         
-        embedding_layer = self._build_embedding_layer(vocab_size, embedding_dim, max_post_length, embeddings)
+        embedding_layer = self._build_embedding_layer(vocab_size, max_post_length, embeddings)
 
         post_input = Input(shape=(max_post_length,), dtype='int32')
         embedded_sequences = embedding_layer(post_input)
@@ -334,8 +338,8 @@ class HAN():
 
     def load_model(self, model_name):
 
-        model_path = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{model_name}.h5")
-        post_encoder_path = os.path.join(self.model_dirpath, f"post_encoder_{model_name}.h5")
+        model_path = os.path.join(self.model_dirpath, "classifier.h5")
+        post_encoder_path = os.path.join(self.model_dirpath, "post_encoder.h5")
         self.model_name = model_name
         self.model = load_model(model_path, custom_objects={'AttLayer': AttLayer}) # Keras function
         self.post_encoder = load_model(post_encoder_path, custom_objects={'AttLayer': AttLayer})
@@ -344,11 +348,11 @@ class HAN():
     def save_model(self):
 
         # Save main model
-        outpath = os.path.join(self.model_dirpath, f"blog_predict_identity_cat_{self.model_name}.h5")
+        outpath = os.path.join(self.model_dirpath, "classifier.h5")
         self.model.save(outpath)
 
         # Save post encoder
-        outpath = os.path.join(self.model_dirpath, f"post_encoder_{self.model_name}.h5")
+        outpath = os.path.join(self.model_dirpath, "post_encoder.h5")
         self.post_encoder.save(outpath)
 
     
@@ -383,8 +387,7 @@ class HAN():
             end = start + batch_size
 
         # Save attention weights
-        outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_weights.pkl")
-        #outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_weights_direct.pkl")
+        outpath = os.path.join(self.output_dirpath, "attention_weights.pkl")
         with open(outpath, 'wb') as f:
             pickle.dump(weight_list, f)
 
@@ -415,7 +418,7 @@ class HAN():
             end = start + batch_size
 
         # Save attention weights
-        outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_word_attn_weights.pkl")
+        outpath = os.path.join(self.output_dirpath, f"word_attention_weights.pkl")
         with open(outpath, 'wb') as f:
             pickle.dump(weight_list, f)
 
@@ -500,7 +503,7 @@ class HAN():
         preds[preds<0.5] = False
 
         # Save predictions
-        pred_path = os.path.join(self.output_dirpath, f"model_{self.model_name}_{X_name}_preds.pkl")
+        pred_path = os.path.join(self.output_dirpath, f"{X_name}_preds.pkl")
         pred_df = pd.DataFrame()
         pred_df['tumblog_id'] = X_tids
         for cat, pred, actual in zip(cats, preds.T, y.T):
@@ -525,7 +528,7 @@ class HAN():
         outlines = pd.DataFrame(outlines, columns=['category'] + metrics)
         if not os.path.exists(self.output_dirpath):
             os.mkdir(self.output_dirpath)
-        outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_scores.csv")
+        outpath = os.path.join(self.output_dirpath, "scores.csv")
         outlines.to_csv(outpath, index=False)
 
         return pred_df, scores
@@ -570,8 +573,9 @@ class HAN():
         sel_weighted_posts = {}
         sel_wd_weights = {}
         sel_post_wd_weights = {}
+        top_post_wd_weights = {}
         for tid in tids:
-            sel_posts[tid] = dh.posts[dh.posts['tumblog_id']==tid]['body_str_no_titles'].tolist()
+            sel_posts[tid] = dh.posts[dh.posts['tumblog_id']==tid]['body_toks_str_no_titles'].tolist()
 
         # Assign weights to sentences
         for i in range(len(post_weights)):
@@ -598,10 +602,13 @@ class HAN():
             # Take top 5 and bottom 5 posts
             sel_post_wd_weights[tid] = sorted(sel_post_wd_weights[tid], reverse=True)
             sel_post_wd_weights[tid] = sel_post_wd_weights[tid][:5]+ sel_post_wd_weights[tid][-5:]
+            top_post_wd_weights[tid] = sel_post_wd_weights[tid][0]
 
         # Format posts as HTML string
         post_strings = []
+        top_post_strings = []
         for tid in sel_post_wd_weights.keys():
+            top_post_strings.append(top_wd_weights[tid])
             max_wt = max([el[0] for post in sel_wd_weights[tid] for el in post])
             min_wt = min([el[0] for post in sel_wd_weights[tid] for el in post])
     
@@ -621,11 +628,11 @@ class HAN():
 
             post_strings.append(posts_str)
 
-        post_str_df = pd.DataFrame(list(zip(tids, post_strings)), columns=['tumblog_id', 'ranked_post_str'])
+        post_str_df = pd.DataFrame(list(zip(tids, post_strings, top_post_strings)), columns=['tumblog_id', 'ranked_post_str', 'top_post'])
         #post_str_df['ranked_post_str'] = post_str_df['ranked_post_str'].str.wrap(100)# word wrap
         #post_str_df = post_str_df.sample(50, random_state=7) # downsample
 
-        # Get desciption, predicted and gold category labels
+        # Get description, predicted and gold category labels
         columns = ['tumblog_id', 'restr_segments_25', 'ranked_post_str'] + [f'{cat}_terms' for cat in dh.cats]
         merged = pd.merge(dh.descs, dh.posts, on='tumblog_id')
         merged = pd.merge(merged, post_str_df, on='tumblog_id').loc[:, columns]
@@ -642,6 +649,10 @@ class HAN():
 
         # Drop duplicates
         merged.drop_duplicates(subset=['tumblog_id'], inplace=True)
+
+        # Save top posts
+        outpath = os.path.join(self.output_dirpath, "top_posts.pkl")
+        merged.to_pickle(outpath)
 
         # Separate by category
         if by_category:
@@ -676,17 +687,17 @@ class HAN():
             s = cat_df.style.set_properties(**{'vertical-align': 'top', 'border': '1px solid gray', 'border-collapse': 'collapse',
                 'word-wrap': 'break-word'})
             html_tab = s.render()
-            outpath = os.path.join(self.output_dirpath, f"model_{self.model_name}_{cat.replace('/', '-')}_attn_viz.html")
+            outpath = os.path.join(self.output_dirpath, f"{cat.replace('/', '-')}_attn_viz.html")
             with open(outpath, 'w') as f:
                 f.write(html_tab)
         
 
     def load_attention_weights(self):
-        path = os.path.join(self.output_dirpath, f"model_{self.model_name}_attn_weights.pkl")
+        path = os.path.join(self.output_dirpath, "attention_weights.pkl")
         with open(path, 'rb') as f:
             weight_list = pickle.load(f)
 
-        word_path = os.path.join(self.output_dirpath, f"model_{self.model_name}_word_attn_weights.pkl")
+        word_path = os.path.join(self.output_dirpath, "word_attention_weights.pkl")
         with open(word_path, 'rb') as f:
             word_weight_list = pickle.load(f)
 
@@ -696,19 +707,22 @@ class HAN():
 def main():
 
     parser = argparse.ArgumentParser(description="Train and run hierarchical attention network")
-    parser.add_argument('base_dirpath', nargs='?', help="Path to directory with data, where should save models and output")
+    parser.add_argument('--base_dirpath', nargs='?', help="Path to parent directory with data, where should save models and output directories", default='/usr0/home/mamille2/tumblr/')
     parser.add_argument('--dataset-name', nargs='?', dest='dataname', help="Name to save preprocessed data to")
+    parser.add_argument('--model-name', nargs='?', dest='model_name', help="Name to save model to")
     parser.add_argument('--outcome', nargs='?', dest='outcome_colname', help="Name of column/s to predict")
-    parser.add_argument('--load-model', nargs='?', dest='model_name')
+    parser.add_argument('--load-model', nargs='?', dest='load_model')
     parser.add_argument('--load-data', nargs='?', dest='load_dataname', help="Timestamp name of preprocessed data")
-    parser.add_argument('--load-attn', dest='load_attn', action='store_true')
+    parser.add_argument('--load-attention', dest='load_attn', action='store_true')
     parser.set_defaults(outcome_colname=None)
     args = parser.parse_args()
 
     base_dirpath = args.base_dirpath
     data_dirpath = os.path.join(base_dirpath, 'data')
-    descs_path = os.path.join(base_dirpath, 'data/list_descriptions_100posts.pkl')
-    posts_path = os.path.join(base_dirpath, 'data/textposts_recent100_100posts.pkl')
+    #descs_path = os.path.join(base_dirpath, 'data/list_descriptions_100posts.pkl')
+    #posts_path = os.path.join(base_dirpath, 'data/textposts_recent100_100posts.pkl')
+    descs_path = os.path.join(base_dirpath, 'data/blog_descriptions_recent100_100posts.pkl')
+    posts_path = os.path.join(base_dirpath, 'data/textposts_100posts.pkl')
 
     if args.outcome_colname:
         outcome_colname = args.outcome_colname
@@ -740,26 +754,29 @@ def main():
         
         dh.print_info()
 
-    han = HAN(base_dirpath, name=args.outcome_colname)
 
-    if args.model_name:
+    if args.load_model:
         
+        han = HAN(base_dirpath, name=args.load_model)
+
         # Load model
         print("Loading model...", end=' ')
         sys.stdout.flush()
-        han.load_model(args.model_name)
+        han.load_model(args.load_model)
         print("done.")
         sys.stdout.flush()
 
     else:
 
+        han = HAN(base_dirpath, name=args.model_name)
+
         # Build model
         print("Building model...", end=' ')
         sys.stdout.flush()
         if args.outcome_colname:
-            han.build_model(dh.max_num_words, dh.embedding_dim, dh.max_post_length, dh.max_num_posts, n_outcomes=1)
+            han.build_model(dh.max_num_words, dh.max_post_length, dh.max_num_posts, embeddings='tumblr_recent100_fasttext', n_outcomes=1)
         else:
-            han.build_model(dh.max_num_words, dh.embedding_dim, dh.max_post_length, dh.max_num_posts)
+            han.build_model(dh.max_num_words, dh.max_post_length, dh.max_num_posts)
         print('done.')
         han.model.summary()
         sys.stdout.flush()
