@@ -23,7 +23,7 @@ os.environ['KERAS_BACKEND']='theano'
 #os.environ['THEANO_FLAGS'] = 'device=cpu'
 
 # Use GPU
-os.environ['CUDA_VISIBLE_DEVICES']='4'
+os.environ['CUDA_VISIBLE_DEVICES']='2'
 os.environ['THEANO_FLAGS'] = 'device=cuda'
 os.environ['THEANO_FLAGS'] = 'floatX=float32'
 os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
@@ -301,7 +301,7 @@ class HAN():
 
 
     def build_model(self, vocab_size, max_post_length, max_num_posts, 
-        embeddings='tumblr_recent100_fasttext', n_outcomes=8):
+        embeddings='tumblr_recent100_fasttext', n_outcomes=13):
         
         embedding_layer = self._build_embedding_layer(vocab_size, max_post_length, embeddings)
 
@@ -608,7 +608,9 @@ class HAN():
         post_strings = []
         top_post_strings = []
         for tid in sel_post_wd_weights.keys():
-            top_post_strings.append(top_wd_weights[tid])
+            top_post_strings.append(top_post_wd_weights[tid])
+            if len([el[0] for post in sel_wd_weights[tid] for el in post]) == 0:
+                continue
             max_wt = max([el[0] for post in sel_wd_weights[tid] for el in post])
             min_wt = min([el[0] for post in sel_wd_weights[tid] for el in post])
     
@@ -672,14 +674,14 @@ class HAN():
                 cat_df = merged[mask]
 
             # Select columns
-            sel_cols = ['tumblog_id', 'restr_segments_25', 'predicted_categories', 'actual_categories', 'ranked_post_str'] + [f'{cat}_terms' for cat in dh.cats]
+            sel_cols = ['tumblog_id', 'restr_segments_25', 'predicted_categories', 'actual_categories', 'ranked_post_str'] + [f'{cat}_terms' for cat in dh.cats] + [f'pred_{cat}' for cat in dh.cats] + [f'actual_{cat}' for cat in dh.cats]
             cat_df = cat_df.loc[:, sel_cols]
 
             if len(cat_df) > 50:
                 cat_df = cat_df.sample(50, random_state=7) # downsample
 
             if not cat in ['all', 'none']:
-                cat_df.sort_values([f'pred_{cat}', f'actual_{cat}', f'{cat}_terms'], inplace=True, ascending=False) # error when try to sort by multiple list columns
+                cat_df.sort_values([f'pred_{cat}', f'actual_{cat}'], inplace=True, ascending=False) # error when try to sort by multiple list columns
                 #cat_df.sort_values([f'{cat}_terms', 'predicted_categories'], inplace=True, ascending=False) # error when try to sort by multiple list columns
 
             # Save table as HTML
@@ -711,8 +713,9 @@ def main():
     parser.add_argument('--dataset-name', nargs='?', dest='dataname', help="Name to save preprocessed data to")
     parser.add_argument('--model-name', nargs='?', dest='model_name', help="Name to save model to")
     parser.add_argument('--outcome', nargs='?', dest='outcome_colname', help="Name of column/s to predict")
+    parser.add_argument('--epochs', nargs='?', dest='n_epochs', help="Number of epochs to train", default=10, type=int)
     parser.add_argument('--load-model', nargs='?', dest='load_model')
-    parser.add_argument('--load-data', nargs='?', dest='load_dataname', help="Timestamp name of preprocessed data")
+    parser.add_argument('--load-data', nargs='?', dest='load_dataname', help="Name of preprocessed data to load")
     parser.add_argument('--load-attention', dest='load_attn', action='store_true')
     parser.set_defaults(outcome_colname=None)
     args = parser.parse_args()
@@ -784,7 +787,7 @@ def main():
         # Train model
         print("\nTraining model...", end=' ')
         sys.stdout.flush()
-        han.train_model(dh.X['train'], dh.y['train'], dh.X['dev'], dh.y['dev'])
+        han.train_model(dh.X['train'], dh.y['train'], dh.X['dev'], dh.y['dev'], epochs=args.n_epochs)
         print('done.')
         sys.stdout.flush()
 
