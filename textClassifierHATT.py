@@ -23,7 +23,7 @@ os.environ['KERAS_BACKEND']='theano'
 #os.environ['THEANO_FLAGS'] = 'device=cpu'
 
 # Use GPU
-os.environ['CUDA_VISIBLE_DEVICES']='2'
+os.environ['CUDA_VISIBLE_DEVICES']='1'
 os.environ['THEANO_FLAGS'] = 'device=cuda'
 os.environ['THEANO_FLAGS'] = 'floatX=float32'
 os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
@@ -140,17 +140,17 @@ class DataHandler():
         self.posts = pd.read_pickle(posts_filepath)
         self.tids = sorted(self.descs['tumblog_id'].tolist())
 
-    def process_data(self, outcome_colname='all', save=True):
+    def process_data(self, input_colname='body_toks_str_no_titles', outcome_colname='all', save=True):
         """ Preprocesses data and returns vectorized form """
         print("Preprocessing data...", end=" ")
         sys.stdout.flush()
 
         # Get text posts
-        posts_by_blog = [[p for p in self.posts[self.posts['tumblog_id']==tid]['body_toks_str_no_titles'].tolist()] for tid in self.tids] # list of 100 posts/user
+        posts_by_blog = [[p for p in self.posts[self.posts['tumblog_id']==tid][input_colname].tolist()] for tid in self.tids] # list of 100 posts/user
         all_posts = [p for posts in posts_by_blog for p in posts]
 
         # Tokenize text posts
-        tokenizer = Tokenizer(num_words=self.max_num_words,   filters='!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n“”')
+        tokenizer = Tokenizer(num_words=self.max_num_words, filters='!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n“”')
         tokenizer.fit_on_texts(all_posts)
         self.word_index = tokenizer.word_index
         self.vocab = list(self.word_index.keys())[:self.max_num_words]
@@ -279,7 +279,9 @@ class HAN():
             os.mkdir(self.output_dirpath)
         self.embeddings_paths = {
             'tumblr_halfday': (os.path.join(base_dirpath, 'data/recent100_100posts_embeds.npy'), 300),
-            'tumblr_recent100_fasttext': (os.path.join(base_dirpath, 'data/blog_descriptions_100posts_embeds.npy'), 100)
+            'tumblr_recent100_fasttext': (os.path.join(base_dirpath, 'data/blog_descriptions_100posts_embeds.npy'), 100),
+            'tumblr_recent100_300dim': (os.path.join(base_dirpath, 'data/blog_descriptions_100posts_300dim.npy'), 300),
+            'tumblr_recent100_tags': (os.path.join(base_dirpath, 'data/textposts_100posts_tags.npy'), 100),
             } # name: (fpath, ndims)
 
 
@@ -301,7 +303,7 @@ class HAN():
 
 
     def build_model(self, vocab_size, max_post_length, max_num_posts, 
-        embeddings='tumblr_recent100_fasttext', n_outcomes=13):
+        embeddings='tumblr_recent100_300dim', n_outcomes=14):
         
         embedding_layer = self._build_embedding_layer(vocab_size, max_post_length, embeddings)
 
@@ -331,7 +333,7 @@ class HAN():
 
 
     def train_model(self, X_train, y_train, X_dev, y_dev, epochs=10, batch_size=16):
-        callbacks = [SaveBestModel(self, monitor='val_acc', save_best_only=True)]
+        callbacks = [SaveBestModel(self, monitor='val_acc', save_best_only=True, verbose=1)]
         self.model.fit(X_train, y_train, validation_data=(X_dev, y_dev),
               epochs=epochs, batch_size=batch_size, callbacks=callbacks)
 
@@ -712,8 +714,10 @@ def main():
     parser.add_argument('--base_dirpath', nargs='?', help="Path to parent directory with data, where should save models and output directories", default='/usr0/home/mamille2/tumblr/')
     parser.add_argument('--dataset-name', nargs='?', dest='dataname', help="Name to save preprocessed data to")
     parser.add_argument('--model-name', nargs='?', dest='model_name', help="Name to save model to")
+    parser.add_argument('--input', nargs='?', dest='input_colname', help="Name of column with input features. Should be a string with space-separated features.")
     parser.add_argument('--outcome', nargs='?', dest='outcome_colname', help="Name of column/s to predict")
-    parser.add_argument('--epochs', nargs='?', dest='n_epochs', help="Number of epochs to train", default=10, type=int)
+    parser.add_argument('--embeddings', nargs='?', dest='embeddings', help="Name of pretrained embeddings to load", default='tumblr_recent100_300dim')
+    parser.add_argument('--epochs', nargs='?', dest='n_epochs', help="Number of epochs to train", default=100, type=int)
     parser.add_argument('--load-model', nargs='?', dest='load_model')
     parser.add_argument('--load-data', nargs='?', dest='load_dataname', help="Name of preprocessed data to load")
     parser.add_argument('--load-attention', dest='load_attn', action='store_true')
@@ -725,6 +729,7 @@ def main():
     #descs_path = os.path.join(base_dirpath, 'data/list_descriptions_100posts.pkl')
     #posts_path = os.path.join(base_dirpath, 'data/textposts_recent100_100posts.pkl')
     descs_path = os.path.join(base_dirpath, 'data/blog_descriptions_recent100_100posts.pkl')
+    #posts_path = os.path.join(base_dirpath, 'data/textposts_100posts.pkl')
     posts_path = os.path.join(base_dirpath, 'data/textposts_100posts.pkl')
 
     if args.outcome_colname:
@@ -753,7 +758,7 @@ def main():
         dh.load_data(descs_path, posts_path)
         print("done.")
         sys.stdout.flush()
-        dh.process_data(outcome_colname=outcome_colname)
+        dh.process_data(input_colname=args.input_colname, outcome_colname=outcome_colname)
         
         dh.print_info()
 
@@ -777,9 +782,9 @@ def main():
         print("Building model...", end=' ')
         sys.stdout.flush()
         if args.outcome_colname:
-            han.build_model(dh.max_num_words, dh.max_post_length, dh.max_num_posts, embeddings='tumblr_recent100_fasttext', n_outcomes=1)
+            han.build_model(dh.max_num_words, dh.max_post_length, dh.max_num_posts, embeddings=args.embeddings, n_outcomes=1)
         else:
-            han.build_model(dh.max_num_words, dh.max_post_length, dh.max_num_posts)
+            han.build_model(dh.max_num_words, dh.max_post_length, dh.max_num_posts, n_outcomes=len(dh.cats))
         print('done.')
         han.model.summary()
         sys.stdout.flush()
