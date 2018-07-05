@@ -23,7 +23,7 @@ os.environ['KERAS_BACKEND']='theano'
 #os.environ['THEANO_FLAGS'] = 'device=cpu'
 
 # Use GPU
-os.environ['CUDA_VISIBLE_DEVICES']='1'
+os.environ['CUDA_VISIBLE_DEVICES']='0'
 os.environ['THEANO_FLAGS'] = 'device=cuda'
 os.environ['THEANO_FLAGS'] = 'floatX=float32'
 os.environ['LD_LIBRARY_PATH'] = '/usr/local/cuda/lib64'
@@ -140,33 +140,41 @@ class DataHandler():
         self.posts = pd.read_pickle(posts_filepath)
         self.tids = sorted(self.descs['tumblog_id'].tolist())
 
-    def process_data(self, input_colname='body_toks_str_no_titles', outcome_colname='all', save=True):
+    def process_data(self, input_colnames=['body_toks_str_no_titles'], outcome_colname='all', save=True):
         """ Preprocesses data and returns vectorized form """
         print("Preprocessing data...", end=" ")
         sys.stdout.flush()
 
         # Get text posts
-        posts_by_blog = [[p for p in self.posts[self.posts['tumblog_id']==tid][input_colname].tolist()] for tid in self.tids] # list of 100 posts/user
-        all_posts = [p for posts in posts_by_blog for p in posts]
+        posts_by_blog = {}
+        all_posts = {}
+        tokenizer = {}
+        word_index_max = 0
+        data = np.zeros((len(self.tids), self.max_num_posts, self.max_post_length * len(input_colnames)), dtype='int32')
 
-        # Tokenize text posts
-        tokenizer = Tokenizer(num_words=self.max_num_words, filters='!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n“”')
-        tokenizer.fit_on_texts(all_posts)
-        self.word_index = tokenizer.word_index
-        self.vocab = list(self.word_index.keys())[:self.max_num_words]
+        for t in range(len(input_colnames)):
+            posts_by_blog[t] = [[p for p in self.posts[self.posts['tumblog_id']==tid][input_colnames[t]].tolist()] for tid in self.tids] # list of 100 posts/user
+            
+            all_posts[t] = [p for posts in posts_by_blog[t] for p in posts]
 
-        data = np.zeros((len(posts_by_blog), self.max_num_posts, self.max_post_length), dtype='int32')
+            # Tokenize text posts
+            tokenizer[t] = Tokenizer(num_words=self.max_num_words, filters='!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n“”')
+            tokenizer[t].fit_on_texts(all_posts[t])
+            #self.word_index = tokenizer[t].word_index
+            #self.vocab = list(self.word_index.keys())[:self.max_num_words]
 
-        for i, posts in enumerate(posts_by_blog):
-            for j, post in enumerate(posts):
-                if j < self.max_num_posts:
-                    wordTokens = text_to_word_sequence(post)
-                    k=0
-                    for _, word in enumerate(wordTokens):
-                        if k < self.max_post_length and word in self.word_index and self.word_index[word] < self.max_num_words:
-                            data[i,j,k] = tokenizer.word_index[word]
-                            k=k+1                    
+            for i, posts in enumerate(posts_by_blog[t]):
+                for j, post in enumerate(posts):
+                    if j < self.max_num_posts:
+                        word_tokens = text_to_word_sequence(post)
+                        k=0
+                        for _, word in enumerate(word_tokens):
+                            if k < self.max_post_length and word in tokenizer[t].word_index and tokenizer[t].word_index[word] < self.max_num_words:
+                                data[i,j,k + self.max_post_length*t] = tokenizer[t].word_index[word] + word_index_max
+                                k=k+1                    
 
+            word_index_max += min(len(tokenizer[t].word_index), self.max_num_words)
+        
         # Prepare description categories (labels)
         if outcome_colname == 'all':
             cols = self.descs.columns.tolist()
@@ -288,12 +296,20 @@ class HAN():
     def _build_embedding_layer(self, vocab_size, max_post_length, embeddings):
 
         # Load embeddings
-        vocab_embed = np.load(self.embeddings_paths[embeddings][0])
+        lookup_tables = [np.load(self.embeddings_paths[e][0]) for e in embeddings]
+        
+        # Reshape lookup tables to one embedding dimension size
+        max_embedding_dim = max([l.shape[1] for l in lookup_tables])
+        for i,l in enumerate(lookup_tables):
+            if l.shape[1] != max_embedding_dim:
+                lookup_tables[i] = np.pad(l, ((0, 0), (0, max_embedding_dim - l.shape[1])), 'constant', constant_values=0)
+        
+        vocab_embed = np.vstack(lookup_tables)
 
-        embedding_dim = self.embeddings_paths[embeddings][1]
+        #embedding_dim = sum([self.embeddings_paths[e][1] for e in embeddings])
         embedding_layer = Embedding(
                             vocab_size,
-                            embedding_dim,
+                            max_embedding_dim,
                             weights = [vocab_embed],
                             input_length = max_post_length,
                             trainable=True
@@ -303,7 +319,7 @@ class HAN():
 
 
     def build_model(self, vocab_size, max_post_length, max_num_posts, 
-        embeddings='tumblr_recent100_300dim', n_outcomes=14):
+        embeddings=['tumblr_recent100_300dim'], n_outcomes=14):
         
         embedding_layer = self._build_embedding_layer(vocab_size, max_post_length, embeddings)
 
@@ -562,7 +578,7 @@ class HAN():
         return html_str
     
 
-    def attention_visualization(self, post_weights, word_weights, tids, dh, descs_path, posts_path, pred_df,
+    def attention_visualization(self, post_weights, word_weights, tids, dh, descs_path, posts_path, input_colnames, pred_df,
         multiply_weights=False, by_category=False):
         """ Max word weights are set from max word weight per blog """
         
@@ -577,29 +593,37 @@ class HAN():
         sel_post_wd_weights = {}
         top_post_wd_weights = {}
         for tid in tids:
-            sel_posts[tid] = dh.posts[dh.posts['tumblog_id']==tid]['body_toks_str_no_titles'].tolist()
+            #sel_posts[tid] = dh.posts[dh.posts['tumblog_id']==tid].loc[:, input_colnames].tolist()
+            sel_posts[tid] = list(dh.posts[dh.posts['tumblog_id']==tid].loc[:, input_colnames].itertuples(index=False, name=None))
 
         # Assign weights to sentences
         for i in range(len(post_weights)):
             tid = tids[i]
             sel_weighted_posts[tid] = [(post_weights[i][j], post) for j, post in enumerate(sel_posts[tid])] # assuming posts are in order of weights (might want to save out order in DataHandler object)
-            
+
             # Word weights
-            post_wd_wts = word_weights[i]
+            post_wd_wts = word_weights[i] # num_posts x post_input_len
             posts = sel_posts[tid]
+            input_length = int(post_wd_wts.shape[1]/len(input_colnames))
         
             sel_wd_weights[tid] = []
 
             for j in range(len(posts)):
-                wds = posts[j].split()
-                if multiply_weights:
-                    wts = post_weights[i][j] * post_wd_wts[j][:len(wds)]
-                else:
-                    wts = post_wd_wts[j][:len(wds)]
-                sel_wd_weights[tid].append(list(zip(wts, wds)))
+                offset = j * input_length
+                wds_weights = [] # lists of words/tags paired with weights
+
+                for k in range(len(input_colnames)):
+                    wds = posts[j][k].split()
+                    if multiply_weights:
+                        wts = post_weights[i][j] * post_wd_wts[j][offset: offset + len(wds)]
+                    else:
+                        wts = post_wd_wts[j][offset: offset + len(wds)]
+                    wds_weights.append(list(zip(wts, wds)))
+
+                    sel_wd_weights[tid].append(wds_weights)
 
             post_wd_wts, _ = list(zip(*sel_weighted_posts[tid]))
-            sel_post_wd_weights[tid] = list(zip(post_wd_wts, sel_wd_weights[tid])) # tid: [(post_wt, [(wd_wt, wd), ...]), ...]
+            sel_post_wd_weights[tid] = list(zip(post_wd_wts, sel_wd_weights[tid])) # tid: [(post_wt, [[(wd_wt, wd), ...]), [(wd_wt, wd),...]]]
 
             # Take top 5 and bottom 5 posts
             sel_post_wd_weights[tid] = sorted(sel_post_wd_weights[tid], reverse=True)
@@ -607,37 +631,47 @@ class HAN():
             top_post_wd_weights[tid] = sel_post_wd_weights[tid][0]
 
         # Format posts as HTML string
-        post_strings = []
-        top_post_strings = []
+        post_strings = {c: [] for c in input_colnames} # indexed by input modality
+        #top_post_strings = {} # indexed by input modality
         for tid in sel_post_wd_weights.keys():
-            top_post_strings.append(top_post_wd_weights[tid])
-            if len([el[0] for post in sel_wd_weights[tid] for el in post]) == 0:
-                continue
-            max_wt = max([el[0] for post in sel_wd_weights[tid] for el in post])
-            min_wt = min([el[0] for post in sel_wd_weights[tid] for el in post])
-    
-            wd_wts = sel_wd_weights[tid]
-
-            posts_str = ''
-            for i, (post_wt, wd_wt_list) in enumerate(sel_post_wd_weights[tid]):
-                if len(wd_wt_list) == 0:
+            #top_post_strings.append(top_post_wd_weights[tid])
+            
+            # Find max and min input element weights
+            max_wts = []
+            min_wts = []
+            for k in range(len(input_colnames)):
+                if len([el[0] for post in sel_wd_weights[tid] for el in post[k]]) == 0:
                     continue
+                max_wts.append(max([el[0] for post in sel_wd_weights[tid] for el in post[k]]))
+                min_wts.append(min([el[0] for post in sel_wd_weights[tid] for el in post[k]]))
 
-                wts, wds = list(zip(*wd_wt_list))
-                post_str = self._color_post(wds, wts, max_wt, min_wt)
-                posts_str += post_str + '<br><br>'
+            if len(max_wts) == 0:
+                continue
+            max_wt = max(max_wts)
+            min_wt = min(min_wts)
+    
+            # Build post string representations
+            posts_str = {c: '' for c in input_colnames}
+            for i, (post_wt, wd_wt_list) in enumerate(sel_post_wd_weights[tid]):
+                for k, input_col in enumerate(input_colnames):
+                    if len(wd_wt_list[k]) == 0:
+                        continue
 
-                if i == 4:
-                    posts_str += '~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~<br><br>'
+                    wts, wds = list(zip(*wd_wt_list[k]))
+                    posts_str[input_col] = self._color_post(wds, wts, max_wt, min_wt)
+                    posts_str[input_col] += posts_str[input_col] + '<br><br>'
 
-            post_strings.append(posts_str)
+                    if i == 4:
+                        posts_str[input_col] += '~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~<br><br>'
 
-        post_str_df = pd.DataFrame(list(zip(tids, post_strings, top_post_strings)), columns=['tumblog_id', 'ranked_post_str', 'top_post'])
+                    post_strings[input_col].append(posts_str[input_col])
+
+        post_str_df = pd.DataFrame(list(zip(tids, *[post_strings[c] for c in input_colnames])), columns=['tumblog_id'] + [f'{c}_attention_viz' for c in input_colnames])
         #post_str_df['ranked_post_str'] = post_str_df['ranked_post_str'].str.wrap(100)# word wrap
         #post_str_df = post_str_df.sample(50, random_state=7) # downsample
 
         # Get description, predicted and gold category labels
-        columns = ['tumblog_id', 'restr_segments_25', 'ranked_post_str'] + [f'{cat}_terms' for cat in dh.cats]
+        columns = ['tumblog_id'] + [f'{c}_attention_viz' for c in input_colnames] + [f'{cat}_terms' for cat in dh.cats]
         merged = pd.merge(dh.descs, dh.posts, on='tumblog_id')
         merged = pd.merge(merged, post_str_df, on='tumblog_id').loc[:, columns]
 
@@ -676,7 +710,7 @@ class HAN():
                 cat_df = merged[mask]
 
             # Select columns
-            sel_cols = ['tumblog_id', 'restr_segments_25', 'predicted_categories', 'actual_categories', 'ranked_post_str'] + [f'{cat}_terms' for cat in dh.cats] + [f'pred_{cat}' for cat in dh.cats] + [f'actual_{cat}' for cat in dh.cats]
+            sel_cols = ['tumblog_id', 'parsed_blog_description', 'predicted_categories', 'actual_categories'] + [f'{c}_attention_viz' for c in input_colnames] + [f'{cat}_terms' for cat in dh.cats] + [f'pred_{cat}' for cat in dh.cats] + [f'actual_{cat}' for cat in dh.cats]
             cat_df = cat_df.loc[:, sel_cols]
 
             if len(cat_df) > 50:
@@ -691,7 +725,7 @@ class HAN():
             s = cat_df.style.set_properties(**{'vertical-align': 'top', 'border': '1px solid gray', 'border-collapse': 'collapse',
                 'word-wrap': 'break-word'})
             html_tab = s.render()
-            outpath = os.path.join(self.output_dirpath, f"{cat.replace('/', '-')}_attn_viz.html")
+            outpath = os.path.join(self.output_dirpath, f"{cat.replace('/', '-').replace(' ','_')}_attn_viz.html")
             with open(outpath, 'w') as f:
                 f.write(html_tab)
         
@@ -714,9 +748,9 @@ def main():
     parser.add_argument('--base_dirpath', nargs='?', help="Path to parent directory with data, where should save models and output directories", default='/usr0/home/mamille2/tumblr/')
     parser.add_argument('--dataset-name', nargs='?', dest='dataname', help="Name to save preprocessed data to")
     parser.add_argument('--model-name', nargs='?', dest='model_name', help="Name to save model to")
-    parser.add_argument('--input', nargs='?', dest='input_colname', help="Name of column with input features. Should be a string with space-separated features.")
+    parser.add_argument('--input', nargs='?', dest='input_colname', help="Name of column with input features. Should be a string with space-separated features. To combine multiple columns, list with commas separating.")
     parser.add_argument('--outcome', nargs='?', dest='outcome_colname', help="Name of column/s to predict")
-    parser.add_argument('--embeddings', nargs='?', dest='embeddings', help="Name of pretrained embeddings to load", default='tumblr_recent100_300dim')
+    parser.add_argument('--embeddings', nargs='?', dest='embeddings', help="Name of pretrained embeddings to load. If loading posts from varied inputs, separate pretrained embeddings sets with commas.", default='tumblr_recent100_300dim')
     parser.add_argument('--epochs', nargs='?', dest='n_epochs', help="Number of epochs to train", default=100, type=int)
     parser.add_argument('--load-model', nargs='?', dest='load_model')
     parser.add_argument('--load-data', nargs='?', dest='load_dataname', help="Name of preprocessed data to load")
@@ -736,6 +770,11 @@ def main():
         outcome_colname = args.outcome_colname
     else:
         outcome_colname = 'all'
+
+    if ',' in args.input_colname:
+        input_colnames = args.input_colname.split(',')
+    else:
+        input_colnames = [args.input_colname]
 
     # Load, preprocess data
     if args.load_dataname:
@@ -758,7 +797,7 @@ def main():
         dh.load_data(descs_path, posts_path)
         print("done.")
         sys.stdout.flush()
-        dh.process_data(input_colname=args.input_colname, outcome_colname=outcome_colname)
+        dh.process_data(input_colnames=input_colnames, outcome_colname=outcome_colname)
         
         dh.print_info()
 
@@ -781,10 +820,15 @@ def main():
         # Build model
         print("Building model...", end=' ')
         sys.stdout.flush()
-        if args.outcome_colname:
-            han.build_model(dh.max_num_words, dh.max_post_length, dh.max_num_posts, embeddings=args.embeddings, n_outcomes=1)
+        if ',' in args.embeddings:
+            embeddings = args.embeddings.split(',')
         else:
-            han.build_model(dh.max_num_words, dh.max_post_length, dh.max_num_posts, n_outcomes=len(dh.cats))
+            embeddings = args.embeddings[0]
+        if args.outcome_colname:
+            n_outcomes = 1
+        else:
+            n_outcomes = len(dh.cats)
+        han.build_model(dh.max_num_words * len(embeddings), dh.max_post_length * len(embeddings), dh.max_num_posts, embeddings=embeddings, n_outcomes=n_outcomes)
         print('done.')
         han.model.summary()
         sys.stdout.flush()
@@ -825,7 +869,7 @@ def main():
 
     print("Making attention weight visualization...", end=" ")
     sys.stdout.flush()
-    han.attention_visualization(post_attn_weights, word_attn_weights, dh.tids_split['dev'], dh, descs_path, posts_path, pred_df, multiply_weights=True, by_category=True)
+    han.attention_visualization(post_attn_weights, word_attn_weights, dh.tids_split['dev'], dh, descs_path, posts_path, input_colnames, pred_df, multiply_weights=True, by_category=True)
     print('done.')
     sys.stdout.flush()
 
